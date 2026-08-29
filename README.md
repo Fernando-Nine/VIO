@@ -7,7 +7,7 @@
 [![Licença: AGPLv3](https://img.shields.io/badge/licen%C3%A7a-AGPLv3-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
 
-**[Acessar o VIO →](https://vio-1p5k.onrender.com/)**
+**[Acessar o VIO →](https://vio-ap5k.onrender.com/)**
 
 </div>
 
@@ -100,12 +100,6 @@ VIO é licenciado sob **[AGPLv3](LICENSE)**. Na prática: você pode usar, estud
 modificar e redistribuir o código, inclusive comercialmente — mas se você rodar uma
 versão modificada como um serviço que outras pessoas usam pela rede, precisa
 disponibilizar o código dessa versão modificada também, sob a mesma licença.
-
-## Versão e changelog
-
-A versão atual e o histórico completo de mudanças ficam dentro do próprio app — toque no
-número da versão na tela inicial. O mesmo conteúdo também está em
-[`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
