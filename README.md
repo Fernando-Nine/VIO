@@ -7,7 +7,7 @@
 [![Licença: AGPLv3](https://img.shields.io/badge/licen%C3%A7a-AGPLv3-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
 
-**[Acessar o VIO →](https://vio-0ia0.onrender.com/)**
+**[Acessar o VIO →](https://vio-1p5k.onrender.com/)**
 
 </div>
 
