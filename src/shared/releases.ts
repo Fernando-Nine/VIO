@@ -1,0 +1,350 @@
+import legacy from "./legacy-releases.json" with { type: "json" };
+export interface Release {
+  version: string;
+  date: string | null;
+  title: string;
+  legacy?: boolean;
+  systemChange?: boolean;
+  sections: { title: string; items: string[] }[];
+}
+export const version = "2.7.1";
+export const currentRelease: Release = {
+  version,
+  date: "2026-10-11",
+  title: "Convites no foco e catálogo mais claro",
+  sections: [
+    {
+      title: "Interface",
+      items: [
+        "A primeira transmissão oferece o foco vazio; as seguintes seguem para a tira, preservando widgets existentes. Aviso flutuante de novos convites removido.",
+        "Convite Assistir com texto maior e espaçamento adaptado. Abas VIO, Telas, Sala e Comunidade com mais respiro nos cards.",
+        "Widget personalizado abre explicação Em breve em diálogo centralizado com botão de fechar, sem criar conteúdo.",
+      ],
+    },
+  ],
+};
+const roundEPhaseOneRelease: Release = {
+  version: "2.7.0",
+  date: "2026-10-11",
+  title: "Canvas · ajustes finais da rodada E",
+  sections: [
+    {
+      title: "Controles e catálogo",
+      items: [
+        "Setas da tira sem fundo permanente, com círculo no hover/foco e área de clique de pelo menos 40 px, preservando posição e alinhamento.",
+        "Personalizado deixa de ser criável no catálogo. A entrada da comunidade apresenta somente um aviso, sem conteúdo simulado.",
+        "Ao entrar em tela cheia, a barra aparece por um segundo e depois recolhe automaticamente. O gatilho no topo e o foco de teclado continuam disponíveis.",
+      ],
+    },
+  ],
+};
+const roundDRelease: Release = {
+  version: "2.7.0-rc.5",
+  date: "2026-10-10",
+  title: "Rodada D · tira, notas e pessoas",
+  sections: [
+    {
+      title: "Canvas e controles",
+      items: [
+        "A tira é o layout inicial. Setas sobrepostas preservam o alinhamento; a roda usa o mesmo percurso sobre cards, espaços e barra, com avanço suave isolado e movimento contínuo nas sequências.",
+        "Tela cheia começa com a barra recolhida, abre só na borda superior e respeita foco visível de teclado. Volume fecha ao sair após 600 ms, sem botão extra.",
+        "Menu Layout simplificado, foco único sem seletor e dica do modificador configurado durante arraste. O encaixe acompanha o estado atual da tecla.",
+      ],
+    },
+    {
+      title: "Notas e pessoas",
+      items: [
+        "Notas aceitam até seis caixas tituladas, com copiar, salvar e enviar cópia à sala. Cópias identificam remetente e horário; cada pessoa escolhe adicioná-las ao próprio layout, separadas da edição conjunta.",
+        "O botão Pessoas abre os detalhes da sala com contagem, cores, chamada, compartilhamento, criador e ping individual medido pelo servidor. O widget essencial entra somente pelo catálogo.",
+        "Módulos novos do Personalizado e mesclagem de slots aguardam escolha. Prévia em revisão; testes físicos de mídia permanecem pendentes.",
+      ],
+    },
+  ],
+};
+const canvasLayersRelease: Release = {
+  version: "2.7.0-rc.4",
+  date: "2026-10-10",
+  title: "Canvas · avisos visíveis e ordem das janelas",
+  sections: [
+    {
+      title: "Correções de sobreposição",
+      items: [
+        "Avisos acompanham o canvas em tela cheia, abaixo da barra superior e dentro da área visível. Nos Ajustes, aparecem dentro do painel aberto.",
+        "Janelas flutuantes vêm à frente ao clicar ou receber foco do teclado, preservando posições e instâncias dos widgets.",
+        "Detalhes de conexão, volume e espectadores abrem acima dos cards, respeitando as bordas da tela e a área disponível com teclado ou zoom.",
+        "Prévia em revisão; aceite de mídia em aparelhos reais e decisões abertas da rodada C continuam pendentes.",
+      ],
+    },
+  ],
+};
+const canvasInteractionRelease: Release = {
+  version: "2.7.0-rc.3",
+  date: "2026-10-10",
+  title: "Widgets · salvar e encerrar com clareza",
+  sections: [
+    {
+      title: "Correções na validação da rodada C",
+      items: [
+        "Salvar texto fica junto ao título da caixa nas notas compartilhadas, acessível sem sobreposição da barra da chamada em widgets grandes.",
+        "O X do criador informa Encerrar para todos; participantes continuam removendo apenas do próprio layout. O aviso de conclusão também distingue as duas ações.",
+        "Adicionar widgets individuais ou compartilhados leva o foco do teclado ao novo widget; fechar devolve o foco ao espaço liberado.",
+        "Prévia em revisão. As propostas de Notas ampliadas, novos blocos e mesclagem continuam aguardando decisão. O aceite de mídia em aparelhos reais permanece pendente.",
+      ],
+    },
+  ],
+};
+const canvasRevisionRelease: Release = {
+  version: "2.7.0-rc.2",
+  date: "2026-10-06",
+  title: "Canvas revisado · recuperação e controles",
+  sections: [
+    {
+      title: "Ajustes da rodada C",
+      items: [
+        "Reconexão automática com espera progressiva; retoma após quedas longas e reentrada malsucedida, preservando capturas. ICE restart continua tentando as conexões de mídia que falham.",
+        "Foco único usa o espaço principal correto. Foram removidos Esconder e o menu redundante dos widgets; arraste é livre, com Shift para encaixar. Layout oferece destinos por botão e teclado.",
+        "Layout com seleção visual de modo e detalhes; adicionar espaço cria uma posição vazia. Pessoas fica num único widget e o tempo da sala está no detalhe do ping.",
+        "Ícones próprios, popovers sem recorte, botão de sair da tela cheia, controles com inatividade curta e setas junto da tira. O olho mostra os espectadores de cada publicação.",
+        "Compartilhar converte a instância original. O criador encerra o widget para a sala; os demais removem só da própria visão. Cronômetro tem contagem progressiva, regressiva e repetição.",
+        "Notas ampliadas, novos blocos do Personalizado e mesclagem de células estão em proposta, aguardando decisão; não fazem parte desta prévia.",
+      ],
+    },
+    {
+      title: "Canvas e foco",
+      items: [
+        "A tela grande participa do grid. Presets de um a seis espaços, layouts com foco e tira linear; espaços extras são criados por escolha explícita, sem teto de seis pessoas.",
+        "Widgets podem ser movidos e encaixados; foco único mantém os demais em segundo plano. Janelas flutuantes têm posição e tamanho ajustáveis. Trocar o foco reorganiza o grid; foco único mantém as outras transmissões conectadas com áudio em segundo plano.",
+        "Novas telas pedem confirmação. No grid cheio, você escolhe entre janela flutuante e novo espaço. Na tira, novos convites entram no fim sem deslocar a posição atual.",
+        "A tira avança um item por vez, com três espaços visíveis no desktop e menos no celular. Pedidos de qualidade acompanham tamanho e visibilidade do vídeo, sem alterar a captura das outras pessoas.",
+      ],
+    },
+    {
+      title: "Widgets e controles",
+      items: [
+        "Catálogo com transmissões, prévia própria, pessoas, chamada, espectadores, mixer, conexão, duração, ajustes rápidos, notas, cronômetro e blocos personalizados. A aba Comunidade explica o que ainda será implementado.",
+        "Notas, placares e cronômetros são individuais por padrão. Compartilhar é opcional: todos operam o conteúdo, mas só o criador altera a estrutura ou exclui para a sala. Rascunhos conflitantes não sobrescrevem alterações silenciosamente.",
+        "Controles separados em Chamada e Compartilhamento, volume com ponte de hover e fechamento adiado, bordas uniformes, indicador ao vivo suave e olho de espectadores. Botões de tela cheia foram removidos das janelas individuais.",
+        "Dados compartilhados são temporários e apagados quando a sala esvazia ou o servidor reinicia. Layout e widgets individuais ficam no navegador.",
+      ],
+    },
+    {
+      title: "Estado da prévia",
+      items: [
+        "Versão em revisão. Os testes automatizados não substituem o aceite visual, de acessibilidade e de mídia em aparelhos reais; consulte a documentação de validação antes de publicar.",
+      ],
+    },
+  ],
+};
+const preferencesRelease: Release = {
+  version: "2.6.0",
+  date: "2026-09-27",
+  title: "Seu som, sua cor",
+  sections: [
+    {
+      title: "Preferências do aplicativo",
+      items: [
+        "Nova aba Aplicativo nos Ajustes, com volume geral para vozes, telas e efeitos locais, sem alterar o áudio enviado pelo microfone.",
+        "Sons de entrada e saída da sala, efeitos mais presentes e oito eventos que podem ser habilitados separadamente. Volume dos efeitos e botão para experimentar cada som.",
+        "Reconexões, mudanças de cor e atualizações de presença não repetem o aviso de entrada. Preferências ficam salvas neste navegador.",
+        "O volume geral preserva os players e o ganho opcional até 300%, incluindo silêncio e retorno ao volume anterior. Vozes aguardam faixas tardias e não são reiniciadas ao ajustar o volume.",
+      ],
+    },
+    {
+      title: "Identidade por participante",
+      items: [
+        "Em Pessoas, escolha entre rosa, amarelo, verde, anil, ciano, vermelho, roxo e laranja. O círculo com + abre o seletor visual de matiz, saturação e brilho, com entrada HEX e controle por teclado.",
+        "A cor aplicada é compartilhada com a sala, permanece nas reconexões e volta ao anil após sair. Cada sessão altera apenas a própria cor, com validação e limite no servidor.",
+        "Opção local para usar as cores nas bordas das telas, indicador ao vivo e destaque de fala. Avatares mantêm as cores escolhidas; estados de conexão e alertas preservam seus significados.",
+        "Contraste calculado para as iniciais e os destaques, inclusive com cores personalizadas muito claras ou escuras.",
+      ],
+    },
+  ],
+};
+const multiscreenRelease: Release = {
+  version: "2.5.0",
+  date: "2026-09-27",
+  title: "Sua sala, várias telas",
+  sections: [
+    {
+      title: "Pessoas e transmissões no mesmo lugar",
+      items: [
+        "Painel único com quem está compartilhando e quem entrou na chamada, inclusive participantes que apenas escutam. Filtros Todos, Telas e Chamada.",
+        "Assistir abre uma tela; Em conjunto adiciona outras sem o antigo limite de duas. Focar mantém as demais abertas; Só esta fecha as outras por escolha explícita.",
+        "Janelas secundárias móveis e redimensionáveis, com organização à direita ou embaixo, encaixes nas bordas e alternativas por botão e teclado.",
+        "Trocar o foco, mover e ajustar janelas preserva vídeos, conexões e áudio independente. O painel de pessoas compartilha a área livre sem uma faixa reservada para transmissões.",
+      ],
+    },
+    {
+      title: "Troca de sala e continuidade",
+      items: [
+        "Sair libera a interface imediatamente. Confirmações atrasadas e capturas pendentes da sala antiga não interferem na seguinte, mesmo quando a conexão caiu antes da saída.",
+        "Assinaturas já confirmadas não são repetidas a cada atualização de presença. Prévia opcional continua limitada a duas miniaturas leves; o aviso de custo da conexão direta permanece.",
+      ],
+    },
+  ],
+};
+const audioFixRelease: Release = {
+  version: "2.4.1",
+  date: "2026-09-26",
+  title: "Áudio da transmissão e ajustes corrigidos",
+  sections: [
+    {
+      title: "Correções",
+      items: [
+        "Áudio das telas volta à reprodução direta até 100%, sem depender do processamento de ganho. Faixas que chegam depois do vídeo são notificadas e conectadas ao player.",
+        "Amplificação opcional até 300% mantém a faixa original ativa. Se o processamento ficar indisponível, a reprodução continua em até 100%, com opção de tentar novamente.",
+        "Setas dos seletores alinhadas à direita, na mesma linha do valor, preservando seleção por teclado e o visual escuro.",
+      ],
+    },
+  ],
+};
+const togetherRelease: Release = {
+  version: "2.4.0",
+  date: "2026-09-26",
+  title: "Duas telas, a conversa continua",
+  sections: [
+    {
+      title: "Escolher, combinar e alternar",
+      items: [
+        "Novas transmissões aguardam seu clique em Assistir; nenhuma tela é aberta automaticamente.",
+        "Em conjunto mantém duas telas em qualidade principal, uma grande e outra menor, com áudio independente nas duas.",
+        "Trocar o foco entre as telas já abertas preserva as conexões, os vídeos e seus volumes. Uma terceira tela substitui somente o foco escolhido.",
+        "Parar de assistir libera apenas aquela transmissão. Se a principal terminar, a outra tela já aberta assume o foco.",
+      ],
+    },
+    {
+      title: "A sala se adapta",
+      items: [
+        "Participantes em grade compacta com rolagem interna, opção de esconder e restaurar, mantendo arraste e encaixes.",
+        "Aviso de carga a partir de seis pessoas com ícone circular discreto. Clicar na marca VIO sai da sala e volta à entrada.",
+        "Entrar na chamada fica separado de assistir às telas. A conversa só começa após esse clique, com o microfone desligado; sair da chamada mantém as telas.",
+        "Volume das telas no dock: hover abre a barra, clique silencia a tela em foco e toque abre os controles. Ajuste fino opcional libera ganho local até 300%.",
+        "Tela cheia e picture-in-picture no dock. Quando há suporte a Document PiP, a janela flutuante mantém os controles interativos; demais navegadores usam o PiP de vídeo disponível.",
+        "Switches nos ajustes e seletores nativos com visual escuro aprimorado, preservando teclado e compatibilidade.",
+      ],
+    },
+    {
+      title: "Acabamentos discretos",
+      items: [
+        "Degradês escuros e azuis, brilho breve nos botões de ação e pequenos movimentos de hover, mantendo #2727F5 como cor da marca.",
+        "Controles sobre as duas telas com foco de teclado visível; movimentos respeitam a preferência por animação reduzida.",
+      ],
+    },
+  ],
+};
+const controlsRelease: Release = {
+  version: "2.3.0",
+  date: "2026-09-25",
+  title: "Mais espaço, controles mais claros",
+  sections: [
+    {
+      title: "Sala e compartilhamento",
+      items: [
+        "Prévias ao vivo maiores em 16:9, mantendo até duas miniaturas leves; cards e controles ocultos após 2 segundos de inatividade.",
+        "Removida a largura máxima antiga que deixava espaço vazio à direita em monitores maiores.",
+        "Salas sem bloqueio por quantidade de participantes. A partir de seis pessoas, um aviso explica o custo crescente das conexões diretas.",
+        "Resolução de envio selecionável em 240p, 480p, 720p, 1080p, 1440p e 2160p, preservando proporção e limite da captura original.",
+      ],
+    },
+    {
+      title: "Áudio e interface",
+      items: [
+        "Saída padrão não é reaberta desnecessariamente. Falhas de vídeos removidos ou contextos encerrados não alteram a saída dos elementos ativos.",
+        "Dispositivos salvos são validados antes do uso; saída desconectada recebe recuperação única, com mensagem que distingue falha e retorno efetivo ao padrão.",
+        "Tipografia cursiva removida da entrada e da sala; Bricolage Grotesque e IBM Plex Mono locais mantêm a identidade moderna.",
+        "Cursor de mão próprio no azul #2727F5, combinando com o cursor de seta.",
+      ],
+    },
+  ],
+};
+const darkRelease: Release = {
+  version: "2.2.0",
+  date: "2026-09-24",
+  title: "Luzes baixas. Mais espaço para assistir.",
+  sections: [
+    {
+      title: "Interface e sala",
+      items: [
+        "Paleta escura compartilhada pela entrada, sala e ajustes, com o azul #2727F5 da marca e fundo geométrico de movimento suave.",
+        "Entrada ajustada à altura do desktop, campos com foco espaçado, cursor de ação convencional e remoção da seta decorativa e do atalho redundante.",
+        "Transmissão ampliada para a área útil da janela. Controles, seleção de telas e participantes passam a flutuar sobre o vídeo, inclusive em tela cheia.",
+        "Painel de cards arrastável com seis encaixes, indicação do destino e alternativa por clique ou setas do teclado. A posição acompanha o redimensionamento.",
+        "Cards e controles desaparecem após 4,5 segundos de inatividade e reaparecem ao mover, tocar ou usar o teclado. É possível manter os cards visíveis; arraste, menus e foco de teclado suspendem a ocultação.",
+        "Layout responsivo sem rolagem excedente na sala e animações que respeitam a preferência de movimento reduzido.",
+      ],
+    },
+  ],
+};
+const entranceRelease: Release = {
+  version: "2.1.0",
+  date: "2026-09-16",
+  title: "Uma entrada com outra presença",
+  sections: [
+    {
+      title: "Design e interação",
+      items: [
+        "Nova entrada em marfim e preto, com azul sólido e um acento verde-lima. Composição assimétrica com formulário em formato de convite.",
+        "Bricolage Grotesque e Instrument Serif substituem a tipografia anterior; fontes servidas pelo próprio app.",
+        "Prévia interativa de tela, voz e câmera, navegável por clique ou teclado, sem iniciar capturas.",
+        "Inicial personalizada ao digitar o nome, atalho direto ao formulário e feedback no botão de entrada.",
+        "Responsividade a partir de 320 px, contraste AA, foco visível e respeito à preferência de movimento reduzido. Conteúdo, salas e controles preservados.",
+      ],
+    },
+  ],
+};
+const systemRelease: Release = {
+  version: "2.0.0",
+  date: "2026-09-16",
+  title: "Uma nova geração do VIO",
+  systemChange: true,
+  sections: [
+    {
+      title: "Mudança de sistema",
+      items: [
+        "Sistema reescrito do zero: nova estrutura de mídia, sinalização, segurança e interface. A numeração continua depois da 1.9.0; o protótipo desta base foi apresentado como 0.1.0.",
+        "Histórico completo importado somente do CHANGELOG.md de Fernando-Nine/VIO_2. O código do sistema anterior não foi importado.",
+      ],
+    },
+    {
+      title: "Corrigido",
+      items: [
+        "Indicadores de fala acompanham faixas de áudio que chegam depois do cartão, inclusive ao reconectar.",
+        "Reprodução acompanha a chegada tardia de faixas de áudio e vídeo.",
+      ],
+    },
+    {
+      title: "Adicionado",
+      items: [
+        "Prévias ao vivo opcionais, desligadas por padrão, com iniciais no lugar do vídeo e até duas miniaturas leves recebidas de cada vez.",
+        "Ganho manual de microfone entre 20% e 300%, disponível somente com ganho automático desligado e separado da sensibilidade.",
+        "Saída de áudio em bloco próprio para conversa e som das telas, exibida conforme o suporte real do navegador.",
+        "Manifest, ícones e service worker para instalação. O worker trata apenas recursos estáticos: não intercepta navegações de sala, API, sessão ou socket.",
+        "Duração da sala, explicação do limite de participantes e ping visível com cores, alternando entre servidor e conexões de tela.",
+      ],
+    },
+    {
+      title: "Alterado",
+      items: [
+        "Ajustes organizados nas abas Vídeo e Áudio, com navegação por teclado e layout para celular.",
+        "Limite padrão ajustado de quatro para seis participantes; o custo de conexões diretas é explicado na interface.",
+      ],
+    },
+  ],
+};
+export const releases: Release[] = [
+  currentRelease,
+  roundEPhaseOneRelease,
+  roundDRelease,
+  canvasLayersRelease,
+  canvasInteractionRelease,
+  canvasRevisionRelease,
+  preferencesRelease,
+  multiscreenRelease,
+  audioFixRelease,
+  togetherRelease,
+  controlsRelease,
+  darkRelease,
+  entranceRelease,
+  systemRelease,
+  ...legacy,
+];
