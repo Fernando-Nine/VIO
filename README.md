@@ -1,26 +1,16 @@
 # VIO
 
-> Estado atual: candidata **2.7.1**, liberação em andamento. VIO/main será a produção; VIO_TEST/main e vio-test recebem as prévias seguintes. Fase 2 permanece exclusiva do vio-test. [Decisões e validação](docs/RODADA-E.md). As referências a rc.5/2.6.0 abaixo são históricas e foram superadas pela rodada E.
-
 Uma sala para compartilhar tela, conversar e assistir com amigos.
 
-**by NerdQuest Studios · fundado por Nine**  
-Prévia de desenvolvimento **2.7.0-rc.5** · **AGPLv3** · **Node 24**
+**by NerdQuest Studios · fundado por Nine · AGPLv3 · Node 24**
 
-Produção permanece na versão 2.6.0. Esta prévia está no ramo `feat/canvas-widgets` e ainda requer aceite manual.
+Produção: **2.7.1**, [abrir VIO](https://vio-quest.onrender.com/).
+Código atualizado em Fernando-Nine/VIO/main, substituindo a base antiga sem force push.
+Serviço Render `vio-quest`, Free/Virginia, recriado em 12/10/2026 após exclusão do serviço anterior pelo usuário; deploy live e /healthz HTTP 200.
 
-Prévia separada no Render: [experimentar o canvas 2.7](https://vio-test-canvas-preview.onrender.com/).
-O plano gratuito pode precisar de um tempo para iniciar após ficar ocioso.
-
-Publicado em 16/09/2026: [abrir VIO TEST](https://vio-test.onrender.com/).
-Repositório privado **Fernando-Nine/VIO_TEST**, criado pelo usuário, e serviço Render
-**vio-test**, plano Free, região Virginia, uma instância.
-O usuário autorizou substituir o código de **VIO** pela base atual, preservando o histórico. **VIO_2** permanece fora do escopo.
-
-Este projeto foi criado do zero. Somente o CHANGELOG.md de Fernando-Nine/VIO_2 foi
-importado integralmente. O código anterior não foi importado. A versão 2.0.0 marca
-a mudança de sistema e continua a numeração após a 1.9.0. Consulte [o estado da entrega](ESTADO-DO-PROJETO.md) e
-[a matriz de validação](docs/VALIDACAO.md) antes de colocar o serviço em uso.
+Prévia: [vio-test](https://vio-test.onrender.com/), Fernando-Nine/VIO_TEST/main.
+Chat, papéis, notificações e novos widgets da rodada E permanecem exclusivos dessa prévia até novo aval. O código desta base de produção continua na 2.7.1.
+VIO_2 e vio-test-canvas-preview não recebem estas novidades.
 
 ## Executar
 
