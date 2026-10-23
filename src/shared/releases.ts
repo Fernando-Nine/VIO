@@ -7,9 +7,22 @@ export interface Release {
   systemChange?: boolean;
   sections: { title: string; items: string[] }[];
 }
-export const version = "2.7.1";
+export const version = "2.7.2";
 export const currentRelease: Release = {
   version,
+  date: "2026-10-23",
+  title: "Correção de segurança",
+  sections: [
+    {
+      title: "Segurança",
+      items: [
+        "Atualização de uma biblioteca do servidor que permitia disfarçar o endereço de rede e contornar os limites de uso por conexão.",
+      ],
+    },
+  ],
+};
+const inviteFocusRelease: Release = {
+  version: "2.7.1",
   date: "2026-10-11",
   title: "Convites no foco e catálogo mais claro",
   sections: [
@@ -333,6 +346,7 @@ const systemRelease: Release = {
 };
 export const releases: Release[] = [
   currentRelease,
+  inviteFocusRelease,
   roundEPhaseOneRelease,
   roundDRelease,
   canvasLayersRelease,
