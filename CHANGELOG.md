@@ -2,6 +2,13 @@
 
 > **MUDANÇA DE SISTEMA NA 2.0.0:** nova implementação, criada do zero. O histórico anterior foi preservado integralmente a partir somente do CHANGELOG.md de Fernando-Nine/VIO_2.
 
+## [2.7.2] - 2026-10-23
+
+Correção de segurança
+
+### Segurança
+- Atualização de uma biblioteca do servidor que permitia disfarçar o endereço de rede e contornar os limites de uso por conexão.
+
 ## [2.7.1] - 2026-10-11
 
 Convites no foco e catálogo mais claro
