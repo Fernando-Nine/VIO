@@ -14,7 +14,12 @@ import {
   useDroppable,
   type DragEndEvent,
 } from "@dnd-kit/react";
-import { Accessibility, Feedback } from "@dnd-kit/dom";
+import {
+  Accessibility,
+  Feedback,
+  PointerActivationConstraints,
+  PointerSensor,
+} from "@dnd-kit/dom";
 import { Rectangle } from "@dnd-kit/geometry";
 import {
   ArrowDown,
@@ -27,11 +32,13 @@ import {
   Maximize,
   Minimize,
   MonitorUp,
-  NotebookPen,
   Plus,
   SlidersHorizontal,
   X,
 } from "lucide-react";
+import { Notifications } from "../components/Notifications";
+import { canManageRoom } from "../../shared/permissions";
+import type { SharedWidget } from "../../shared/widgets";
 import { contentKind } from "../../shared/widgets";
 import { Dialog } from "../components/Dialog";
 import { ScreenAudio } from "../components/ScreenAudio";
@@ -42,6 +49,7 @@ import {
   focusedWidgetId,
   canRemoveSlot,
   isStrip,
+  slotUnits,
   presetNames,
   type Offer,
   type Preset,
@@ -49,11 +57,36 @@ import {
   type WidgetInstance,
 } from "./model";
 import { floatingBox, useCanvasGeometry } from "./geometry";
-import { useStripInput } from "./strip-input";
+import { wheelTarget } from "./strip-wheel";
+import { useStripInput, stripStops } from "./strip-input";
 import { WidgetFrame } from "./WidgetFrame";
 import { adjacentDropSlot, dropSlotAt, type Point } from "./drag";
 import { createWidget, titleOf, widgetRegistry } from "./widgets";
+import { createModule } from "./ModuleWidget";
+import { isModule, type ModuleKind } from "../../shared/room-modules";
 
+// dnd-kit starts a mouse drag on the handle at pointerdown, so a plain click
+// (or double click to rename) would already detach the widget. Require a
+// small movement first; touch and other pointers keep the library defaults.
+const sensors = (
+  defaults: Parameters<
+    NonNullable<
+      Extract<import("@dnd-kit/dom").DragDropManagerInput["sensors"], Function>
+    >
+  >[0],
+) => [
+  PointerSensor.configure({
+    activationConstraints: (event, source) => {
+      if (event.pointerType === "mouse")
+        return [new PointerActivationConstraints.Distance({ value: 4 })];
+      const fallback = PointerSensor.defaults.activationConstraints;
+      return typeof fallback === "function"
+        ? fallback(event, source)
+        : fallback;
+    },
+  }),
+  ...defaults.filter((s) => s !== PointerSensor),
+];
 const plugins = (
   defaults: Parameters<
     NonNullable<
@@ -109,6 +142,7 @@ function CanvasSlot({
   hidden,
   restore,
   dragging,
+  split,
 }: {
   slot: Slot;
   index: number;
@@ -122,6 +156,7 @@ function CanvasSlot({
   hidden: boolean;
   restore: () => void;
   dragging: boolean;
+  split: () => void;
 }) {
   const { ref, isDropTarget } = useDroppable({
     id: slot.id,
@@ -139,8 +174,23 @@ function CanvasSlot({
       ref={nodeRef}
       className={`canvas-slot ${isDropTarget && !disabled ? "is-drop-target" : ""}`}
       data-slot-id={slot.id}
+      data-span={slotUnits(slot)}
+      style={{ "--slot-span": slotUnits(slot) } as CSSProperties}
       aria-label={`Espaço ${index + 1}`}
     >
+      {Array.from({ length: slotUnits(slot) }, (_, i) => (
+        <i
+          key={i}
+          className="slot-snap-point"
+          aria-hidden="true"
+          style={{ "--unit-index": i } as CSSProperties}
+        />
+      ))}
+      {!slot.widgetId && !slot.offer && slotUnits(slot) > 1 && (
+        <button className="split-slot text-button" onClick={split}>
+          Dividir espaço
+        </button>
+      )}
       {hidden ? (
         <button className="add-widget" onClick={restore}>
           <Plus size={20} />
@@ -208,6 +258,7 @@ export function RoomCanvas(props: Props) {
   const [catalog, setCatalog] = useState<string | null>(null);
   const [catalogTab, setCatalogTab] = useState("native");
   const [communityNotice, setCommunityNotice] = useState(false);
+  const [moduleChoice, setModuleChoice] = useState<ModuleKind | null>(null);
   const [layoutOpen, setLayoutOpen] = useState(false);
   const [drag, setDrag] = useState<{ id: string; x: number; y: number } | null>(
     null,
@@ -223,6 +274,7 @@ export function RoomCanvas(props: Props) {
   const shift = useRef(false);
   const keyboardDrag = useRef(false);
   const [nearTop, setNearTop] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [fullscreenIntro, setFullscreenIntro] = useState(false);
   const [highlightedSlot, setHighlightedSlot] = useState<string | null>(null);
   const pendingFocus = useRef<string | null>(null);
@@ -260,6 +312,32 @@ export function RoomCanvas(props: Props) {
   }, [props.isFullscreen]);
   const seen = useRef(new Set<string>());
   const stripMode = isStrip(state);
+  const stripBox = geometry.strip;
+  // Lift the call dock above a bottom strip so it never covers it.
+  const dockLift =
+    stripMode &&
+    !state.single &&
+    stripBox &&
+    stripBox.width > stripBox.height &&
+    stripBox.y > geometry.bounds.height / 2
+      ? geometry.bounds.height - stripBox.y
+      : 0;
+  useLayoutEffect(() => {
+    root.current
+      ?.closest<HTMLElement>(".player")
+      ?.style.setProperty("--dock-lift", `${dockLift}px`);
+  }, [dockLift, root]);
+  // The dock floats at the bottom centre; widgets ending right there reserve
+  // its height so their last controls (chat input, poll actions) stay usable.
+  const underDock = (box: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }) =>
+    Math.abs(box.y + box.height - (geometry.bounds.height - dockLift)) < 14 &&
+    box.x < geometry.bounds.width / 2 + 230 &&
+    box.x + box.width > geometry.bounds.width / 2 - 230;
   useStripInput(root, strip, stripMode && !state.single);
   const offer = state.pending[0];
   useEffect(() => {
@@ -303,6 +381,9 @@ export function RoomCanvas(props: Props) {
         })),
     ) || [];
   const publicationsKey = publications.map((p) => p.id).join("|");
+  const liveUnwatched = publications.filter(
+    (p) => !p.own && !engine.view.watching.includes(p.id),
+  );
   const epoch = useRef(snapshot?.epoch);
 
   function focusHeader(id: string) {
@@ -381,6 +462,13 @@ export function RoomCanvas(props: Props) {
       ...latest.slots.flatMap((s) => (s.offer ? [s.offer] : [])),
     ])
       if (!live.has(item.id)) store.decline(item.id);
+    for (const widget of latest.widgets) {
+      const approved = snapshot?.widgets?.find(
+        (w) =>
+          w.id === widget.config.pendingShareId && w.owner === engine.view.id,
+      );
+      if (approved) store.bindShared(widget.id, approved.id);
+    }
     for (const widget of latest.widgets)
       if (
         widget.config.sharedId &&
@@ -430,9 +518,56 @@ export function RoomCanvas(props: Props) {
       engine.watchRequest = undefined;
     };
   });
-  function addWidget(type: string) {
+  function openShared(widget: SharedWidget, bringToFocus = false) {
+    const state = store.getSnapshot();
+    const existing = state.widgets.find((w) => w.config.sharedId === widget.id);
+    if (existing) {
+      focus(existing.id);
+      return;
+    }
+    const id = freshKey();
+    const destination =
+      state.slots.find((s) => s.id === catalog && !s.widgetId && !s.offer)
+        ?.id ||
+      state.slots.find((s) => !s.widgetId && !s.offer)?.id ||
+      store.addSlot();
+    store.add(
+      {
+        id,
+        type: contentKind(widget),
+        title: widget.title,
+        config: { sharedId: widget.id },
+        transient: true,
+      },
+      destination,
+    );
+    if (bringToFocus) focus(id);
+    focusHeader(id);
+    setCatalog(null);
+  }
+  async function addWidget(type: string, scope?: "room" | "individual") {
+    if (isModule(type) && !scope) {
+      setModuleChoice(type);
+      return;
+    }
+    if (type === "chat" || (isModule(type) && scope === "room")) {
+      try {
+        const widget = await engine.request<SharedWidget>("widget-create", {
+          id: freshKey(),
+          content: isModule(type)
+            ? createModule(type)
+            : { kind: "chat", title: "Chat", blocks: [] },
+        });
+        engine.receiveSharedWidget(widget);
+        openShared(widget);
+      } catch (e) {
+        engine.fail(e);
+      }
+      return;
+    }
     const existing =
       !["custom", "notes", "timer"].includes(type) &&
+      !isModule(type) &&
       store.getSnapshot().widgets.find((w) => w.type === type);
     if (existing) {
       focus(existing.id);
@@ -480,7 +615,11 @@ export function RoomCanvas(props: Props) {
       const shared = engine.view.snapshot?.widgets?.find(
         (w) => w.id === widget.config.sharedId,
       );
-      if (shared?.owner === engine.view.id) {
+      if (
+        shared &&
+        (shared.owner === engine.view.id ||
+          canManageRoom(snapshot, engine.view.id))
+      ) {
         try {
           await engine.request("widget-delete", { id: shared.id });
           endedForEveryone = true;
@@ -503,26 +642,20 @@ export function RoomCanvas(props: Props) {
   function scrollStep(direction: number) {
     const el = strip.current;
     if (!el) return;
-    const nodes = [...el.querySelectorAll<HTMLElement>(".canvas-slot")];
-    const horizontal = el.scrollWidth > el.clientWidth + 2;
+    const horizontal = getComputedStyle(el).gridAutoFlow === "column";
     const position = horizontal ? el.scrollLeft : el.scrollTop;
-    const offset = (node: HTMLElement) =>
-      horizontal
-        ? node.offsetLeft - (nodes[0]?.offsetLeft || 0)
-        : node.offsetTop - (nodes[0]?.offsetTop || 0);
-    const index = nodes.reduce(
-      (best, node, i) =>
-        Math.abs(offset(node) - position) <
-        Math.abs(offset(nodes[best]) - position)
-          ? i
-          : best,
-      0,
+    const maximum = horizontal
+      ? el.scrollWidth - el.clientWidth
+      : el.scrollHeight - el.clientHeight;
+    const target = wheelTarget(
+      position,
+      direction,
+      stripStops(el),
+      maximum,
+      false,
     );
-    const target =
-      nodes[Math.max(0, Math.min(nodes.length - 1, index + direction))];
-    if (!target) return;
     el.scrollTo({
-      [horizontal ? "left" : "top"]: offset(target),
+      [horizontal ? "left" : "top"]: target,
       behavior: el.ownerDocument.defaultView?.matchMedia(
         "(prefers-reduced-motion: reduce)",
       ).matches
@@ -597,6 +730,7 @@ export function RoomCanvas(props: Props) {
     hidden: false,
     restore: () => {},
     dragging: !!drag && !keyboardDrag.current,
+    split: () => store.splitSlot(slot.id),
   });
   useLayoutEffect(() => {
     if (!highlightedSlot) return;
@@ -618,7 +752,7 @@ export function RoomCanvas(props: Props) {
 
   return (
     <div
-      className={`room-canvas ${props.isFullscreen ? "is-fullscreen" : ""} ${nearTop || fullscreenIntro ? "show-top-toolbar" : ""}`}
+      className={`room-canvas ${props.isFullscreen ? "is-fullscreen" : ""} ${nearTop || fullscreenIntro || notificationsOpen ? "show-top-toolbar" : ""}`}
       onPointerMove={(event) => {
         if (event.pointerType === "mouse")
           setNearTop(
@@ -676,18 +810,16 @@ export function RoomCanvas(props: Props) {
         </button>
         <button
           className="text-button"
-          aria-label="Adicionar espaço vazio"
+          aria-label="Adicionar widget"
           onClick={() => {
-            const id =
-              state.slots.find((s) => !s.widgetId && !s.offer)?.id ||
-              store.addSlot();
-            setHighlightedSlot(id);
+            // Target the first free slot; with none, picking a widget adds one.
             store.change((s) => {
               s.single = false;
             });
-            announce(
-              "Espaço vazio pronto. Clique em Adicionar widget para escolher o conteúdo.",
+            setCatalog(
+              state.slots.find((s) => !s.widgetId && !s.offer)?.id ?? "new",
             );
+            setCatalogTab("native");
           }}
         >
           <Plus size={16} />
@@ -702,17 +834,32 @@ export function RoomCanvas(props: Props) {
           <Columns3 size={16} />
           <span>{state.single ? "Voltar ao conjunto" : "Foco único"}</span>
         </button>
-        {!!snapshot?.noteCopies?.length && (
+        <Notifications
+          engine={engine}
+          openWidget={(w) => openShared(w, true)}
+          openScreen={showPublication}
+          onOpenChange={setNotificationsOpen}
+        />
+        {liveUnwatched.length > 0 && (
           <button
-            className="text-button"
-            aria-label={`Notas recebidas (${snapshot.noteCopies.length})`}
+            className="live-chip"
             onClick={() => {
-              setCatalog("auto");
-              setCatalogTab("room");
+              if (liveUnwatched.length === 1)
+                showPublication(liveUnwatched[0].id);
+              else {
+                setCatalog(
+                  state.slots.find((s) => !s.widgetId && !s.offer)?.id ?? "new",
+                );
+                setCatalogTab("live");
+              }
             }}
           >
-            <NotebookPen size={16} />
-            <span>Notas recebidas ({snapshot.noteCopies.length})</span>
+            <i className="live-pulse" aria-hidden="true" />
+            <span>
+              {liveUnwatched.length === 1
+                ? `${liveUnwatched[0].title} ao vivo`
+                : `${liveUnwatched.length} transmissões ao vivo`}
+            </span>
           </button>
         )}
         <button
@@ -730,6 +877,7 @@ export function RoomCanvas(props: Props) {
       </div>
       <DragDropProvider
         plugins={plugins}
+        sensors={sensors}
         onDragStart={(event, manager) => {
           const id = String(event.operation.source?.id || "");
           const rect = event.operation.source?.element?.getBoundingClientRect();
@@ -855,8 +1003,24 @@ export function RoomCanvas(props: Props) {
                 "--focus-ratio": `${state.ratio * 100}%`,
                 "--strip-visible": visibleSlots,
                 "--grid-count": state.slots.length,
+                "--auto-columns": Math.min(
+                  state.slots.length,
+                  geometry.bounds.width < 680
+                    ? 2
+                    : state.preset === "grid-4" || state.preset === "grid-2"
+                      ? 2
+                      : 3,
+                ),
                 "--grid-rows": Math.ceil(
-                  state.slots.length / (geometry.bounds.width < 680 ? 2 : 3),
+                  state.slots.length /
+                    Math.min(
+                      state.slots.length,
+                      geometry.bounds.width < 680
+                        ? 2
+                        : state.preset === "grid-4" || state.preset === "grid-2"
+                          ? 2
+                          : 3,
+                    ),
                 ),
               } as CSSProperties
             }
@@ -884,9 +1048,63 @@ export function RoomCanvas(props: Props) {
               ))
             )}
           </div>
+          {stripMode && !state.single && (
+            <div className="slot-junctions" aria-label="Mesclar espaços vazios">
+              {state.slots.slice(1, -1).map((slot, i) => {
+                const next = state.slots[i + 2],
+                  a = geometry.slots.get(slot.id),
+                  b = geometry.slots.get(next.id);
+                const area = geometry.strip;
+                if (
+                  !a ||
+                  !b ||
+                  !area ||
+                  !a.visible ||
+                  !b.visible ||
+                  slot.widgetId ||
+                  slot.offer ||
+                  next.widgetId ||
+                  next.offer ||
+                  slotUnits(slot) + slotUnits(next) > Math.min(3, visibleSlots)
+                )
+                  return null;
+                const horizontal =
+                  geometry.bounds.width < 680 ||
+                  ["strip-top", "strip-bottom"].includes(state.preset);
+                if (
+                  horizontal
+                    ? a.x < area.x - 2 ||
+                      b.x + b.width > area.x + area.width + 2
+                    : a.y < area.y - 2 ||
+                      b.y + b.height > area.y + area.height + 2
+                )
+                  return null;
+                return (
+                  <button
+                    className="merge-slot"
+                    key={slot.id}
+                    aria-label={`Mesclar espaços ${i + 2} e ${i + 3}`}
+                    title="Mesclar espaços vazios"
+                    style={{
+                      left: horizontal
+                        ? (a.x + a.width + b.x) / 2
+                        : a.x + a.width / 2,
+                      top: horizontal
+                        ? a.y + a.height / 2
+                        : (a.y + a.height + b.y) / 2,
+                    }}
+                    onClick={() => store.mergeSlots(slot.id, next.id)}
+                  >
+                    <Plus size={16} />
+                  </button>
+                );
+              })}
+            </div>
+          )}
           {stripMode &&
             !state.single &&
-            state.slots.length - 1 > visibleSlots && (
+            state.slots.slice(1).reduce((n, s) => n + slotUnits(s), 0) >
+              visibleSlots && (
               <div
                 className={`strip-controls ${geometry.bounds.width < 680 || ["strip-top", "strip-bottom"].includes(state.preset) ? "is-horizontal" : "is-vertical"}`}
                 role="group"
@@ -949,6 +1167,12 @@ export function RoomCanvas(props: Props) {
                 engine={engine}
                 box={box || { x: 0, y: 0, width: 1, height: 1 }}
                 bounds={geometry.bounds}
+                underDock={
+                  widget.type !== "screen" &&
+                  !floating &&
+                  !!box &&
+                  underDock(box)
+                }
                 height={box?.height || 0}
                 visible={visible}
                 focused={focused}
@@ -1066,7 +1290,7 @@ export function RoomCanvas(props: Props) {
             </div>
           </fieldset>
           <fieldset className="layout-details">
-            <legend>Organize seu Layout</legend>
+            <legend>{stripMode ? "Posição do foco" : "Disposição"}</legend>
             {stripMode ? (
               <div
                 className="layout-directions"
@@ -1123,17 +1347,7 @@ export function RoomCanvas(props: Props) {
                 />
               </label>
             )}
-            <p className="field-note">
-              O layout preserva os widgets abertos. Espaços vazios podem ser
-              removidos pelo X. Arraste livremente; segure{" "}
-              {canvasShortcuts.snap.label} para encaixar.
-            </p>
           </fieldset>
-          <p className="field-note">
-            A partir de seis participantes, o envio direto entre navegadores
-            exige mais rede e processamento. A sala não tem limite fixo de
-            pessoas.
-          </p>
         </Dialog>
       )}
       {catalog && (
@@ -1162,16 +1376,26 @@ export function RoomCanvas(props: Props) {
             <>
               <div className="widget-catalog">
                 {Object.values(widgetRegistry)
-                  .filter((w) => w.id !== "screen" && w.id !== "custom")
+                  .filter((w) => !["screen", "custom", "canvas"].includes(w.id))
                   .map((w) => (
                     <button
                       className="catalog-item"
                       key={w.id}
-                      onClick={() => addWidget(w.id)}
+                      disabled={
+                        w.id === "canvas" ||
+                        (w.id === "chat" &&
+                          !canManageRoom(snapshot, engine.view.id))
+                      }
+                      onClick={() => void addWidget(w.id)}
                     >
                       <w.icon size={20} aria-hidden="true" />
                       <strong>{w.title}</strong>
-                      <span>{w.description}</span>
+                      <span>
+                        {w.id === "chat" &&
+                        !canManageRoom(snapshot, engine.view.id)
+                          ? "Só o criador e administradores adicionam. Chats existentes ficam em Sala."
+                          : w.description}
+                      </span>
                     </button>
                   ))}
               </div>
@@ -1219,32 +1443,7 @@ export function RoomCanvas(props: Props) {
                     <button
                       className="catalog-item"
                       key={w.id}
-                      onClick={() => {
-                        const existing = state.widgets.find(
-                          (widget) => widget.config.sharedId === w.id,
-                        );
-                        if (existing) focus(existing.id);
-                        else {
-                          const id = freshKey();
-                          store.add(
-                            {
-                              id,
-                              type: contentKind(w),
-                              title: w.title,
-                              config: { sharedId: w.id },
-                              transient: true,
-                            },
-                            catalog === "auto"
-                              ? store
-                                  .getSnapshot()
-                                  .slots.find((s) => !s.widgetId && !s.offer)
-                                  ?.id || store.addSlot()
-                              : catalog,
-                          );
-                          focusHeader(id);
-                        }
-                        setCatalog(null);
-                      }}
+                      onClick={() => openShared(w)}
                     >
                       <strong>{w.title}</strong>
                       <span>
@@ -1256,73 +1455,10 @@ export function RoomCanvas(props: Props) {
                   ))}
                 </div>
               )}
-              {!!snapshot?.noteCopies?.length && (
-                <section aria-label="Notas recebidas">
-                  <h3>Notas recebidas</h3>
-                  <div className="widget-catalog">
-                    {snapshot.noteCopies.map((note) => (
-                      <article className="received-note" key={note.id}>
-                        <strong>{note.label}</strong>
-                        <small>
-                          {note.senderName} ·{" "}
-                          {new Date(note.sentAt).toLocaleString("pt-BR")}
-                        </small>
-                        <p className="plain-note">
-                          {note.value || "Texto vazio."}
-                        </p>
-                        <button
-                          className="secondary"
-                          onClick={() => {
-                            const id = freshKey();
-                            const destination =
-                              state.slots.find(
-                                (slot) =>
-                                  slot.id === catalog &&
-                                  !slot.widgetId &&
-                                  !slot.offer,
-                              )?.id ||
-                              state.slots.find(
-                                (slot) => !slot.widgetId && !slot.offer,
-                              )?.id ||
-                              store.addSlot();
-                            store.add(
-                              {
-                                id,
-                                type: "notes",
-                                title: note.label,
-                                config: {
-                                  noteSender: note.senderName,
-                                  noteSentAt: String(note.sentAt),
-                                },
-                                state: {
-                                  kind: "notes",
-                                  title: note.label,
-                                  blocks: [
-                                    {
-                                      id: freshKey(),
-                                      kind: "text",
-                                      label: note.label,
-                                      value: note.value,
-                                    },
-                                  ],
-                                },
-                              },
-                              destination,
-                            );
-                            setCatalog(null);
-                            focusHeader(id);
-                          }}
-                        >
-                          Adicionar cópia ao meu layout
-                        </button>
-                      </article>
-                    ))}
-                  </div>
-                </section>
-              )}
               <p className="field-note">
-                Adicionar não muda a organização de outras pessoas. O criador
-                gerencia a estrutura; todos usam o conteúdo.
+                Cada pessoa escolhe o que entra no próprio layout. O criador e
+                administradores gerenciam widgets públicos; convidados editam
+                com permissão.
               </p>
             </>
           )}
@@ -1337,6 +1473,48 @@ export function RoomCanvas(props: Props) {
               </button>
             </>
           )}
+        </Dialog>
+      )}
+      {catalog && moduleChoice && (
+        <Dialog
+          title={widgetRegistry[moduleChoice].title}
+          centered
+          close={() => setModuleChoice(null)}
+        >
+          <p>Escolha onde usar este widget.</p>
+          <div className="module-scope">
+            <button
+              className="primary"
+              disabled={!canManageRoom(snapshot, engine.view.id)}
+              onClick={() => {
+                const type = moduleChoice;
+                setModuleChoice(null);
+                void addWidget(type, "room");
+              }}
+            >
+              Adicionar à sala
+            </button>
+            <button
+              className="secondary"
+              onClick={() => {
+                const type = moduleChoice;
+                setModuleChoice(null);
+                void addWidget(type, "individual");
+              }}
+            >
+              Só para mim
+            </button>
+          </div>
+          {!canManageRoom(snapshot, engine.view.id) && (
+            <p className="field-note">
+              Só o criador e administradores adicionam diretamente à sala. Você
+              pode criar um individual e pedir para compartilhar.
+            </p>
+          )}
+          <p className="field-note">
+            Na sala, cada pessoa recebe um convite para adicionar ao próprio
+            layout.
+          </p>
         </Dialog>
       )}
       {catalog && communityNotice && (

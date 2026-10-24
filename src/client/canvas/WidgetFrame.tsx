@@ -1,14 +1,19 @@
+import { canManageRoom } from "../../shared/permissions";
 import { canvasShortcuts } from "./shortcuts";
 import {
   memo,
   useCallback,
   useLayoutEffect,
+  useMemo,
   useRef,
+  useState,
   type CSSProperties,
   type KeyboardEvent,
 } from "react";
 import { useDraggable } from "@dnd-kit/react";
-import { ArrowLeftRight, Grip, X } from "lucide-react";
+import { ArrowLeftRight, Ellipsis, Grip, Pencil, X } from "lucide-react";
+import { ContextMenu, type MenuItem } from "../components/ContextMenu";
+import { HeaderToolsSlot, type MenuSource, type Rename } from "./header-tools";
 import type { Controller } from "../room/controller";
 import { participantStyle } from "../components/participant-style";
 import {
@@ -28,6 +33,7 @@ interface Props extends WidgetProps {
   floatingOrder: number;
   active: boolean;
   stripAxis?: "x" | "y";
+  underDock?: boolean;
   moving?: { x: number; y: number };
   motionKey: string;
   tabIndex: number;
@@ -87,11 +93,33 @@ export function WidgetFrame(props: Props) {
     [ref],
   );
   const title = titleOf(widget, engine);
+  const [tools, setTools] = useState<HTMLElement | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [rename, setRenameState] = useState<Rename>();
+  const [bodyMenu, setBodyMenu] = useState<MenuSource>();
+  const [renaming, setRenaming] = useState(false);
+  const slot = useMemo(
+    () => ({
+      slot: tools,
+      // Wrapped so React stores the function instead of calling it.
+      setRename: (next: Rename | undefined) => setRenameState(() => next),
+      setMenu: (next: MenuSource | undefined) => setBodyMenu(() => next),
+    }),
+    [tools],
+  );
+  function commitTitle(input: HTMLInputElement) {
+    const next = input.value.trim();
+    setRenaming(false);
+    if (!rename || !next || next === title) return;
+    rename(next.slice(0, 64)).catch((e) => engine.fail(e));
+  }
   const endsForEveryone =
     !!widget.config.sharedId &&
     engine.view.snapshot?.widgets?.some(
       (shared) =>
-        shared.id === widget.config.sharedId && shared.owner === engine.view.id,
+        shared.id === widget.config.sharedId &&
+        (shared.owner === engine.view.id ||
+          canManageRoom(engine.view.snapshot, engine.view.id)),
     );
   const def = widgetRegistry[widget.type];
   const Icon = def?.icon || Grip;
@@ -144,6 +172,28 @@ export function WidgetFrame(props: Props) {
           ? 3
           : 2,
   } as CSSProperties;
+  const removeLabel = endsForEveryone
+    ? "Encerrar para todos"
+    : widget.type === "screen"
+      ? "Desconectar transmissão"
+      : "Remover deste layout";
+  const menuItems: MenuItem[] = [
+    ...(rename
+      ? [{ label: "Renomear", icon: Pencil, run: () => setRenaming(true) }]
+      : []),
+    ...(def?.menu?.(props) || []),
+    ...(bodyMenu?.() || []),
+    ...(focused
+      ? []
+      : [
+          {
+            label: "Trazer para o foco",
+            icon: ArrowLeftRight,
+            run: props.focus,
+          },
+        ]),
+    { label: removeLabel, icon: X, danger: true, run: props.close },
+  ];
   function resizeTo(width: number, height: number) {
     engine.canvas.detach(widget.id, {
       x: box.x / bounds.width,
@@ -156,7 +206,7 @@ export function WidgetFrame(props: Props) {
     <section
       ref={hostRef}
       style={style}
-      className={`widget-host ${widget.type === "screen" ? "is-screen" : ""} ${focused ? "is-focused" : ""} ${floating ? "is-floating" : ""} ${widget.type === "screen" && !props.active ? "screen-controls-idle" : ""} ${moving ? "is-dragging" : ""}`}
+      className={`widget-host ${widget.type === "screen" ? "is-screen" : ""} ${focused ? "is-focused" : ""} ${floating ? "is-floating" : ""} ${widget.type === "screen" && !props.active ? "screen-controls-idle" : ""} ${moving ? "is-dragging" : ""} ${props.underDock ? "under-dock" : ""}`}
       data-widget-id={widget.id}
       data-strip-axis={props.stripAxis}
       aria-label={title}
@@ -164,21 +214,78 @@ export function WidgetFrame(props: Props) {
       onPointerDownCapture={() => floating && engine.canvas.raise(widget.id)}
       onFocusCapture={() => floating && engine.canvas.raise(widget.id)}
     >
-      <header className="widget-header">
-        <button
-          ref={handleRef}
-          className="widget-handle"
-          tabIndex={props.tabIndex}
-          onFocus={props.onFocusHeader}
-          onKeyDown={props.navigate}
-          aria-label={`Mover ${title}. Use espaço para mover pelo teclado. No mouse, segure ${canvasShortcuts.snap.label} para encaixar.`}
-          title={`Arrastar livremente · ${canvasShortcuts.snap.label} encaixa`}
-        >
-          <Icon size={15} aria-hidden="true" />
-          <span>{title}</span>
-        </button>
+      <header
+        className="widget-header"
+        onContextMenu={(event) => {
+          if ((event.target as HTMLElement).closest("input, textarea")) return;
+          event.preventDefault();
+          // The ContextMenu key reports no pointer position: open at the title.
+          const box = event.currentTarget.getBoundingClientRect();
+          setMenu(
+            event.clientX || event.clientY
+              ? { x: event.clientX, y: event.clientY }
+              : { x: box.left + 12, y: box.bottom },
+          );
+        }}
+      >
+        {renaming ? (
+          <label className="widget-handle widget-rename">
+            <Icon size={15} aria-hidden="true" />
+            <input
+              aria-label={`Nome de ${title}`}
+              defaultValue={title}
+              maxLength={64}
+              autoFocus
+              onFocus={(e) => e.currentTarget.select()}
+              onBlur={(e) => commitTitle(e.currentTarget)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" && e.key !== "Escape") return;
+                e.stopPropagation();
+                if (e.key === "Escape") e.currentTarget.value = title;
+                e.currentTarget.blur();
+                // Keyboard users land back on the title they were editing.
+                requestAnimationFrame(() =>
+                  element.current
+                    ?.querySelector<HTMLElement>("button.widget-handle")
+                    ?.focus({ preventScroll: true }),
+                );
+              }}
+            />
+          </label>
+        ) : (
+          <button
+            ref={handleRef}
+            className="widget-handle"
+            tabIndex={props.tabIndex}
+            onFocus={props.onFocusHeader}
+            onKeyDown={(event) => {
+              if (event.key === "F2" && rename) {
+                event.preventDefault();
+                setRenaming(true);
+              } else props.navigate(event);
+            }}
+            onDoubleClick={() => rename && setRenaming(true)}
+            aria-label={`Mover ${title}. Use espaço para mover pelo teclado. No mouse, segure ${canvasShortcuts.snap.label} para encaixar.${rename ? " F2 renomeia." : ""}`}
+            title={`Arrastar livremente · ${canvasShortcuts.snap.label} encaixa${rename ? " · clique duplo renomeia" : ""}`}
+          >
+            <Icon size={15} aria-hidden="true" />
+            <span>{title}</span>
+          </button>
+        )}
         <HeaderAccessory widget={widget} engine={engine} />
+        <div className="widget-tools" ref={setTools} />
         <div className="widget-actions">
+          <button
+            className="icon-button widget-more"
+            aria-label={`Ações de ${title}`}
+            aria-haspopup="menu"
+            onClick={(event) => {
+              const box = event.currentTarget.getBoundingClientRect();
+              setMenu({ x: box.left, y: box.bottom });
+            }}
+          >
+            <Ellipsis size={16} />
+          </button>
           {!focused && (
             <button
               className="icon-button widget-focus"
@@ -199,13 +306,7 @@ export function WidgetFrame(props: Props) {
                   ? `Desconectar ${title}`
                   : `Remover ${title} deste layout`
             }
-            title={
-              endsForEveryone
-                ? "Encerrar para todos na sala"
-                : widget.type === "screen"
-                  ? "Desconectar transmissão"
-                  : "Remover deste layout"
-            }
+            title={removeLabel}
           >
             <X size={15} />
           </button>
@@ -222,12 +323,23 @@ export function WidgetFrame(props: Props) {
             props.focus();
         }}
       >
-        <Body
-          {...props}
-          visible={visible}
-          height={Math.max(0, box.height - 38)}
-        />
+        <HeaderToolsSlot.Provider value={slot}>
+          <Body
+            {...props}
+            visible={visible}
+            height={Math.max(0, box.height - 38)}
+          />
+        </HeaderToolsSlot.Provider>
       </div>
+      {menu && (
+        <ContextMenu
+          at={menu}
+          items={menuItems}
+          label={`Ações de ${title}`}
+          close={() => setMenu(null)}
+          origin={element.current}
+        />
+      )}
       {floating && (
         <button
           className="widget-resizer"

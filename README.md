@@ -4,13 +4,15 @@ Uma sala para compartilhar tela, conversar e assistir com amigos.
 
 **by NerdQuest Studios · fundado por Nine · AGPLv3 · Node 24**
 
-Produção: **2.7.1**, [abrir VIO](https://vio-quest.onrender.com/).
-Código atualizado em Fernando-Nine/VIO/main, substituindo a base antiga sem force push.
-Serviço Render `vio-quest`, Free/Virginia, recriado em 12/10/2026 após exclusão do serviço anterior pelo usuário; deploy live e /healthz HTTP 200.
+- Produção: [VIO 2.7.1](https://vio-quest.onrender.com/), repositório Fernando-Nine/VIO, serviço Render `vio-quest`.
+- Prévia: [vio-test](https://vio-test.onrender.com/), repositório Fernando-Nine/VIO_TEST, ramo main. Prévia publicada: 2.8.0.
+- A Fase 2 não vai ao VIO principal sem aval. Não atualizar vio-test-canvas-preview nem VIO_2.
 
-Prévia: [vio-test](https://vio-test.onrender.com/), Fernando-Nine/VIO_TEST/main.
-Chat, papéis, notificações e novos widgets da rodada E permanecem exclusivos dessa prévia até novo aval. O código desta base de produção continua na 2.7.1.
-VIO_2 e vio-test-canvas-preview não recebem estas novidades.
+O código antigo de VIO foi substituído pela implementação atual em 11/10/2026,
+preservando o histórico, sem force push (commit 196ba88). A versão 2.7.1 passou
+pelo aceite direcionado e pelo health check do Render; criação de sala conferida.
+A prévia acrescenta Chat, papéis, notificações e mesclagem da tira. Estado,
+limites e decisões abertas: [estado atual](docs/ESTADO.md).
 
 ## Executar
 
@@ -66,7 +68,7 @@ auxiliares desaparecem após dois segundos sem atividade, preservando foco de te
 Tema escuro, azul #2727F5, fontes locais e movimento reduzido permanecem.
 
 Detalhes: [arquitetura do canvas](docs/CANVAS.md), [validação](docs/VALIDACAO.md)
-e [pendências em linguagem simples](docs/PENDENCIAS.md).
+e [estado atual](docs/ESTADO.md).
 
 ## O que a interface oferece
 

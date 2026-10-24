@@ -5,6 +5,13 @@ import { io, type Socket } from "socket.io-client";
 import { createApp } from "../src/server/app";
 import { readConfig } from "../src/server/config";
 import { verifyToken, issueToken } from "../src/server/security";
+import { defaultModule } from "../src/shared/room-modules";
+import { trimToBudget, chatBudget, historyBudget } from "../src/server/widgets";
+import type { SharedWidget, ChatMessageEvent } from "../src/shared/widgets";
+import {
+  defaultPermissions,
+  type RoomPermissions,
+} from "../src/shared/protocol";
 import type {
   Reply,
   Snapshot,
@@ -1028,6 +1035,13 @@ test("widgets compartilhados isolam salas e estrutura, preservam operações con
       ).ok,
       false,
     );
+    data(
+      await request(owner, "widget-permission", {
+        id,
+        allGuests: true,
+        allowed: true,
+      }),
+    );
     const operationId = crypto.randomUUID();
     const increment = {
       id,
@@ -1049,7 +1063,7 @@ test("widgets compartilhados isolam salas e estrutura, preservam operações con
       (room.widgets.entries.get(id)!.blocks[0] as { value: number }).value,
       3,
     );
-    assert.equal(room.widgets.entries.get(id)!.revision, 3);
+    assert.equal(room.widgets.entries.get(id)!.revision, 4);
     const conflict = await request(member, "widget-operate", {
       id,
       operationId: crypto.randomUUID(),
@@ -1074,12 +1088,12 @@ test("widgets compartilhados isolam salas e estrutura, preservam operações con
           kind: "text",
           blockId: text,
           value: "Texto revisado",
-          revision: 3,
+          revision: 4,
         },
       }),
     );
     assert.equal(
-      (await request(owner, "widget-structure", { id, revision: 3, content }))
+      (await request(owner, "widget-structure", { id, revision: 4, content }))
         .ok,
       false,
     );
@@ -1095,9 +1109,9 @@ test("widgets compartilhados isolam salas e estrutura, preservam operações con
       }),
     );
     assert.equal(
-      (await request(member, "widget-structure", { id, revision: 5, content }))
+      (await request(member, "widget-structure", { id, revision: 6, content }))
         .ok,
-      false,
+      true,
     );
     assert.equal(room.widgets.entries.size, 1);
     data(await request(member, "leave"));
@@ -1124,7 +1138,13 @@ test("widgets rejeitam campos extras, payloads excessivos, blocos duplicados e e
       label: "Nota",
       value: "Texto",
     };
-    const content = { title: "Notas", blocks: [block] };
+    const content = {
+      title: "Módulo legado",
+      blocks: [
+        block,
+        { id: crypto.randomUUID(), kind: "score", label: "Pontos", value: 0 },
+      ],
+    };
     assert.equal(
       (
         await request(socket, "widget-create", {
@@ -1375,14 +1395,14 @@ test("compartilhar é idempotente e somente criador encerra a instância para to
     data(await request(member, "join", { name: "Colega", code: "QACLOSE" }));
     const id = crypto.randomUUID(),
       content = {
-        kind: "notes",
-        title: "Notas",
+        kind: "custom",
+        title: "Placar",
         blocks: [
           {
             id: crypto.randomUUID(),
-            kind: "text",
-            label: "Texto",
-            value: "Não duplicar",
+            kind: "score",
+            label: "Pontos",
+            value: 0,
           },
         ],
       };
@@ -1403,7 +1423,7 @@ test("compartilhar é idempotente e somente criador encerra a instância para to
   }
 });
 
-test("rodada D: cópias isoladas por sala, criador e ping medido no servidor", async () => {
+test("rodada E: Notas canceladas, sucessão e ping medido no servidor", async () => {
   const app = await server();
   const sockets: Socket[] = [];
   try {
@@ -1438,27 +1458,9 @@ test("rodada D: cópias isoladas por sala, criador e ping medido no servidor", a
     );
     assert.equal(b.snapshot.creatorId, a.id);
     assert.equal(c.snapshot.creatorId, c.id);
-    const copy = data(await request(sockets[0], "note-send", input));
-    assert.equal(copy.senderId, a.id);
-    assert.equal((await request(sockets[1], "note-send", input)).ok, false);
-    assert.equal(
-      (await request(sockets[0], "note-send", { ...input, senderId: b.id })).ok,
-      false,
-    );
-    const restored = data(
-      await request<{ snapshot: Snapshot }>(sockets[1], "join", {
-        name: "Bia",
-        code: "RODADAD",
-      }),
-    );
-    assert.equal(restored.snapshot.noteCopies?.[0].value, input.value);
-    const other = data(
-      await request<{ snapshot: Snapshot }>(sockets[2], "join", {
-        name: "Caio",
-        code: "OUTRAD",
-      }),
-    );
-    assert.deepEqual(other.snapshot.noteCopies, []);
+    assert.equal((await request(sockets[0], "note-send", input)).ok, false);
+    assert.equal("noteCopies" in b.snapshot, false);
+    assert.equal("noteCopies" in c.snapshot, false);
     const measured = new Promise<{ id: string; pingMs: number }>((resolve) =>
       sockets[1].once("participant-ping", resolve),
     );
@@ -1473,7 +1475,7 @@ test("rodada D: cópias isoladas por sala, criador e ping medido no servidor", a
         code: "RODADAD",
       }),
     );
-    assert.equal(remaining.snapshot.creatorId, a.id);
+    assert.equal(remaining.snapshot.creatorId, b.id);
     await request(sockets[1], "leave");
     const empty = data(
       await request<{ snapshot: Snapshot }>(sockets[1], "join", {
@@ -1481,8 +1483,986 @@ test("rodada D: cópias isoladas por sala, criador e ping medido no servidor", a
         code: "RODADAD",
       }),
     );
-    assert.deepEqual(empty.snapshot.noteCopies, []);
+    assert.equal("noteCopies" in empty.snapshot, false);
     assert.equal(empty.snapshot.creatorId, b.id);
+  } finally {
+    sockets.forEach((s) => s.disconnect());
+    await app.close();
+  }
+});
+
+test("rodada E: chat autenticado, permissões, pedidos e sucessão por administrador mais antigo", async () => {
+  const app = await server();
+  const sockets: Socket[] = [];
+  try {
+    const people: { id: string; snapshot: Snapshot }[] = [];
+    for (let i = 0; i < 5; i++) {
+      const socket = await connect(app.url, (await session(app.url)).token);
+      sockets.push(socket);
+      people.push(
+        data(
+          await request(socket, "join", {
+            name: `Pessoa ${i}`,
+            code: i === 4 ? "OUTRAE" : "RODADAE",
+          }),
+        ),
+      );
+    }
+    const [creator, guest, admin, admin2, outsider] = sockets;
+    const id = crypto.randomUUID();
+    const chat = { kind: "chat", title: "Conversa", blocks: [] };
+    assert.equal(
+      (await request(guest, "widget-create", { id, content: chat })).ok,
+      false,
+    );
+    data(
+      await request(creator, "role", {
+        participantId: people[3].id,
+        action: "promote",
+      }),
+    );
+    data(
+      await request(creator, "role", {
+        participantId: people[2].id,
+        action: "promote",
+      }),
+    );
+    assert.equal(
+      (
+        await request(admin, "role", {
+          participantId: people[1].id,
+          action: "promote",
+        })
+      ).ok,
+      false,
+    );
+    data(await request(admin, "widget-create", { id, content: chat }));
+    const messageId = crypto.randomUUID();
+    const events: ChatMessageEvent[] = [];
+    admin.on("chat-message", (e: ChatMessageEvent) => events.push(e));
+    const sent = data(
+      await request(guest, "chat-send", {
+        id,
+        messageId,
+        text: "<img src=x onerror=alert(1)>",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(events.length, 1);
+    assert.equal(events[0].id, id);
+    assert.equal(events[0].revision, sent.revision);
+    assert.equal(events[0].message.authorId, people[1].id);
+    assert.equal(events[0].message.authorName, "Pessoa 1");
+    assert.equal(events[0].message.text, "<img src=x onerror=alert(1)>");
+    const retry = data(
+      await request(guest, "chat-send", {
+        id,
+        messageId,
+        text: "<img src=x onerror=alert(1)>",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(retry.revision, sent.revision);
+    assert.equal(events.length, 1);
+    const rejoined = data(
+      await request(admin, "join", { name: "Pessoa 2", code: "RODADAE" }),
+    ).snapshot as Snapshot;
+    assert.equal(
+      rejoined.widgets!.find((w) => w.id === id)!.messages!.length,
+      1,
+    );
+    assert.equal(
+      (
+        await request(guest, "chat-send", {
+          id,
+          messageId: crypto.randomUUID(),
+          text: "muito rápido",
+        })
+      ).ok,
+      false,
+    );
+    assert.equal(
+      (
+        await request(outsider, "chat-send", {
+          id,
+          messageId: crypto.randomUUID(),
+          text: "invasor",
+        })
+      ).ok,
+      false,
+    );
+    assert.equal(
+      (
+        await request(creator, "chat-send", {
+          id,
+          messageId: crypto.randomUUID(),
+          text: "a".repeat(2001),
+        })
+      ).ok,
+      false,
+    );
+    assert.equal(
+      (
+        await request(creator, "chat-send", {
+          id,
+          messageId: crypto.randomUUID(),
+          text: "x",
+          authorId: people[1].id,
+        })
+      ).ok,
+      false,
+    );
+    const memberChat = data(
+      await request(guest, "join", { name: "Pessoa 1", code: "RODADAE" }),
+    ).snapshot.widgets[0];
+    assert.equal(memberChat.messages.length, 1);
+    assert.equal(
+      (
+        await request(guest, "widget-structure", {
+          id,
+          revision: 1,
+          content: { ...chat, title: "Negado" },
+        })
+      ).ok,
+      false,
+    );
+    data(
+      await request(admin, "widget-permission", {
+        id,
+        participantId: people[1].id,
+        allowed: true,
+      }),
+    );
+    data(
+      await request(guest, "widget-structure", {
+        id,
+        revision: 2,
+        content: { ...chat, title: "Autorizado" },
+      }),
+    );
+    assert.equal(
+      (
+        await request(guest, "widget-permission", {
+          id,
+          allGuests: true,
+          allowed: true,
+        })
+      ).ok,
+      false,
+    );
+    data(
+      await request(admin, "widget-permission", {
+        id,
+        participantId: people[1].id,
+        allowed: false,
+      }),
+    );
+    assert.equal(
+      (
+        await request(guest, "widget-structure", {
+          id,
+          revision: 4,
+          content: chat,
+        })
+      ).ok,
+      false,
+    );
+    const timerId = crypto.randomUUID();
+    const timer = {
+      kind: "timer",
+      title: "Tempo",
+      blocks: [
+        {
+          id: crypto.randomUUID(),
+          kind: "timer",
+          label: "Tempo",
+          duration: 0,
+          elapsed: 0,
+          startedAt: null,
+        },
+      ],
+    };
+    assert.equal(
+      data(
+        await request(guest, "widget-create", { id: timerId, content: timer }),
+      ).pending,
+      true,
+    );
+    assert.equal(
+      app.rooms.rooms.get("RODADAE")!.widgets.entries.has(timerId),
+      false,
+    );
+    assert.equal(
+      (await request(guest, "widget-review", { id: timerId, approve: true }))
+        .ok,
+      false,
+    );
+    const otherGuestSnapshot = app.rooms.snapshot(
+      app.rooms.rooms.get("RODADAE")!,
+      people[4].id,
+    );
+    assert.deepEqual(otherGuestSnapshot.shareRequests, []);
+    data(await request(admin, "widget-review", { id: timerId, approve: true }));
+    assert.equal(
+      app.rooms.rooms.get("RODADAE")!.widgets.entries.get(timerId)?.owner,
+      people[1].id,
+    );
+    assert.equal(
+      (
+        await request(guest, "widget-operate", {
+          id: timerId,
+          operationId: crypto.randomUUID(),
+          operation: {
+            kind: "timer",
+            blockId: timer.blocks[0].id,
+            action: "start",
+            revision: 0,
+          },
+        })
+      ).ok,
+      false,
+    );
+    data(await request(guest, "widget-delete", { id: timerId }));
+    assert.equal((await request(guest, "widget-delete", { id })).ok, false);
+    data(await request(creator, "leave"));
+    assert.equal(app.rooms.rooms.get("RODADAE")!.creatorId, people[2].id);
+    assert.match(
+      app.rooms.rooms.get("RODADAE")!.notices.at(-1)!.text,
+      /Pessoa 2/,
+    );
+    data(
+      await request(admin, "role", {
+        participantId: people[1].id,
+        action: "transfer",
+      }),
+    );
+    assert.equal(app.rooms.rooms.get("RODADAE")!.creatorId, people[1].id);
+    data(await request(admin2, "widget-delete", { id }));
+    assert.equal(app.rooms.rooms.get("RODADAE")!.widgets.entries.size, 0);
+  } finally {
+    sockets.forEach((s) => s.disconnect());
+    await app.close();
+  }
+});
+
+test("novos widgets: participação, autoria, idempotência e edição autorizadas no servidor", async () => {
+  const app = await server(),
+    sockets: Socket[] = [];
+  try {
+    const sessions = await Promise.all([
+      session(app.url),
+      session(app.url),
+      session(app.url),
+    ]);
+    for (const s of sessions) sockets.push(await connect(app.url, s.token));
+    data(
+      await request(sockets[0], "join", { code: "MODULEQA", name: "Criador" }),
+    );
+    data(
+      await request(sockets[1], "join", {
+        code: "MODULEQA",
+        name: "Convidado",
+      }),
+    );
+    data(await request(sockets[2], "join", { code: "OUTSIDER", name: "Fora" }));
+    const pollId = crypto.randomUUID(),
+      poll = defaultModule("poll", () => crypto.randomUUID());
+    if (poll.kind !== "poll") assert.fail();
+    const content = {
+      kind: "poll",
+      title: "Decisão",
+      blocks: [],
+      module: poll,
+    };
+    const pending = data(
+      await request(sockets[1], "widget-create", { id: pollId, content }),
+    );
+    assert.equal(pending.pending, true);
+    data(
+      await request(sockets[0], "widget-review", { id: pollId, approve: true }),
+    );
+    const interact = (
+      socket: Socket,
+      id: string,
+      operation: unknown,
+      operationId = crypto.randomUUID(),
+    ) =>
+      request<SharedWidget>(socket, "module-interact", {
+        id,
+        operation,
+        operationId,
+      });
+    assert.equal(
+      (
+        await interact(sockets[1], pollId, {
+          kind: "poll-control",
+          action: "start",
+          revision: 0,
+        })
+      ).ok,
+      false,
+    );
+    data(
+      await interact(sockets[0], pollId, {
+        kind: "poll-control",
+        action: "start",
+        revision: 0,
+      }),
+    );
+    const voted = data(
+      await interact(sockets[1], pollId, {
+        kind: "vote",
+        optionId: poll.options[0].id,
+      }),
+    );
+    assert.equal(
+      voted.moduleState?.votes?.[sessions[1].id],
+      poll.options[0].id,
+    );
+    assert.equal(
+      (
+        await interact(sockets[2], pollId, {
+          kind: "vote",
+          optionId: poll.options[0].id,
+        })
+      ).ok,
+      false,
+    );
+    assert.equal(
+      (
+        await request(sockets[1], "widget-structure", {
+          id: pollId,
+          revision: voted.revision,
+          content,
+        })
+      ).ok,
+      false,
+    );
+    data(
+      await request(sockets[0], "widget-permission", {
+        id: pollId,
+        participantId: sessions[1].id,
+        allowed: true,
+      }),
+    );
+    const snap = data(
+      await request(sockets[0], "join", { code: "MODULEQA", name: "Criador" }),
+    ).snapshot as Snapshot;
+    const current = snap.widgets!.find((w) => w.id === pollId)!;
+    const edited = data(
+      await request<SharedWidget>(sockets[1], "widget-structure", {
+        id: pollId,
+        revision: current.revision,
+        content: { ...content, module: { ...poll, question: "Nova pergunta" } },
+      }),
+    );
+    assert.deepEqual(edited.moduleState, {});
+    const diceId = crypto.randomUUID();
+    data(
+      await request(sockets[0], "widget-create", {
+        id: diceId,
+        content: {
+          kind: "dice",
+          title: "Dados",
+          blocks: [],
+          module: defaultModule("dice", () => crypto.randomUUID()),
+        },
+      }),
+    );
+    const operationId = crypto.randomUUID(),
+      operation = { kind: "roll", expression: "2d6+3" };
+    const rolled = data(
+      await interact(sockets[1], diceId, operation, operationId),
+    );
+    const repeated = data(
+      await interact(sockets[1], diceId, operation, operationId),
+    );
+    assert.deepEqual(repeated.moduleState, rolled.moduleState);
+    assert.equal(rolled.moduleState?.history?.length, 1);
+    assert.equal(rolled.moduleState?.history?.[0].authorId, sessions[1].id);
+    assert.equal(rolled.moduleState?.history?.[0].authorName, "Convidado");
+    assert.ok(Number(rolled.moduleState?.history?.[0].label) >= 5);
+    assert.ok(Number(rolled.moduleState?.history?.[0].label) <= 15);
+    assert.equal(
+      (
+        await interact(sockets[1], diceId, {
+          ...operation,
+          authorId: sessions[0].id,
+        })
+      ).ok,
+      false,
+    );
+    assert.equal((await interact(sockets[1], diceId, operation)).ok, false);
+    assert.equal(
+      (
+        await interact(sockets[1], diceId, {
+          kind: "reset",
+          revision: rolled.revision,
+        })
+      ).ok,
+      false,
+    );
+    assert.equal((await interact(sockets[2], diceId, operation)).ok, false);
+    const taskId = crypto.randomUUID(),
+      tasks = defaultModule("tasks", () => crypto.randomUUID());
+    if (tasks.kind !== "tasks") assert.fail();
+    data(
+      await request(sockets[0], "widget-create", {
+        id: taskId,
+        content: { kind: "tasks", title: "Sessão", blocks: [], module: tasks },
+      }),
+    );
+    assert.equal(
+      (
+        await interact(sockets[1], taskId, {
+          kind: "task",
+          itemId: tasks.items[0].id,
+          done: true,
+          revision: 0,
+        })
+      ).ok,
+      false,
+    );
+    const done = data(
+      await interact(sockets[0], taskId, {
+        kind: "task",
+        itemId: tasks.items[0].id,
+        done: true,
+        revision: 0,
+      }),
+    );
+    assert.ok(done.moduleState?.done?.[tasks.items[0].id]);
+    assert.equal(
+      (
+        await interact(sockets[0], taskId, {
+          kind: "session",
+          action: "start",
+          revision: 0,
+        })
+      ).ok,
+      false,
+    );
+  } finally {
+    sockets.forEach((s) => s.disconnect());
+    await app.close();
+  }
+});
+
+test("orçamento de memória: chats, histórico e reinício de Dados só com permissão", async () => {
+  assert.deepEqual(
+    trimToBudget([1, 2, 3, 4, 5], 3, 100, () => 1),
+    [3, 4, 5],
+  );
+  assert.deepEqual(
+    trimToBudget(["a", "bb", "ccc"], 10, 5, (v) => v.length),
+    ["bb", "ccc"],
+  );
+  assert.deepEqual(
+    trimToBudget(["x".repeat(9)], 10, 5, (v) => v.length),
+    ["x".repeat(9)],
+  );
+  const app = await server(),
+    sockets: Socket[] = [];
+  try {
+    const sessions = await Promise.all([
+      session(app.url),
+      session(app.url),
+      session(app.url),
+    ]);
+    for (const s of sessions) sockets.push(await connect(app.url, s.token));
+    const [creator, guest, admin] = sockets;
+    data(await request(creator, "join", { code: "BUDGETQA", name: "Criador" }));
+    data(await request(guest, "join", { code: "BUDGETQA", name: "Convidado" }));
+    data(await request(admin, "join", { code: "BUDGETQA", name: "Admin" }));
+    data(
+      await request(creator, "role", {
+        participantId: sessions[2].id,
+        action: "promote",
+      }),
+    );
+    const chat = { kind: "chat", title: "Conversa", blocks: [] };
+    for (let i = 0; i < chatBudget.widgets; i++)
+      data(
+        await request(i % 2 ? admin : creator, "widget-create", {
+          id: crypto.randomUUID(),
+          content: chat,
+        }),
+      );
+    const extra = await request(creator, "widget-create", {
+      id: crypto.randomUUID(),
+      content: chat,
+    });
+    assert.equal(extra.ok, false);
+    if (!extra.ok) assert.equal(extra.code, "WIDGET_LIMIT");
+
+    const diceId = crypto.randomUUID();
+    const interact = (socket: Socket, operation: unknown) =>
+      request<SharedWidget>(socket, "module-interact", {
+        id: diceId,
+        operation,
+        operationId: crypto.randomUUID(),
+      });
+    data(
+      await request(creator, "widget-create", {
+        id: diceId,
+        content: {
+          kind: "dice",
+          title: "Dados",
+          blocks: [],
+          module: defaultModule("dice", () => crypto.randomUUID()),
+        },
+      }),
+    );
+    let widget = data(
+      await interact(guest, { kind: "roll", expression: "1d20" }),
+    );
+    const denied = await interact(guest, {
+      kind: "reset",
+      revision: widget.revision,
+    });
+    assert.equal(denied.ok, false);
+    if (!denied.ok) assert.equal(denied.code, "FORBIDDEN");
+    assert.equal(
+      (await interact(admin, { kind: "reset", revision: widget.revision + 5 }))
+        .ok,
+      false,
+    );
+    widget = data(
+      await interact(admin, { kind: "reset", revision: widget.revision }),
+    );
+    assert.deepEqual(widget.moduleState, {});
+    data(
+      await request(creator, "widget-permission", {
+        id: diceId,
+        participantId: sessions[1].id,
+        allowed: true,
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 750));
+    widget = data(await interact(guest, { kind: "roll", expression: "1d20" }));
+    widget = data(
+      await interact(guest, { kind: "reset", revision: widget.revision }),
+    );
+    assert.deepEqual(widget.moduleState, {});
+    for (let i = 0; i < 3; i++) {
+      if (i) await new Promise((r) => setTimeout(r, 750));
+      widget = data(
+        await interact(creator, { kind: "roll", expression: "5#100d1000000" }),
+      );
+    }
+    const history = widget.moduleState!.history!;
+    assert.ok(history.length < 3);
+    assert.ok(
+      history.reduce(
+        (n, r) =>
+          n + r.detail.length + r.label.length + (r.expression?.length || 0),
+        0,
+      ) <= historyBudget.chars,
+    );
+
+    data(await request(guest, "leave"));
+    const snap = data(
+      await request(creator, "join", { code: "BUDGETQA", name: "Criador" }),
+    ).snapshot as Snapshot;
+    assert.deepEqual(
+      snap.widgets!.find((w) => w.id === diceId)!.guestEditors,
+      [],
+    );
+  } finally {
+    sockets.forEach((s) => s.disconnect());
+    await app.close();
+  }
+});
+
+test("votação esconde votos por opção até encerrar, por fechamento ou prazo", async () => {
+  const app = await server(),
+    sockets: Socket[] = [];
+  try {
+    const sessions = await Promise.all([
+      session(app.url),
+      session(app.url),
+      session(app.url),
+    ]);
+    for (const s of sessions) sockets.push(await connect(app.url, s.token));
+    const [creator, guest, other] = sockets;
+    data(
+      await request(creator, "join", { code: "SECRETPOLL", name: "Criador" }),
+    );
+    data(
+      await request(guest, "join", { code: "SECRETPOLL", name: "Convidado" }),
+    );
+    data(await request(other, "join", { code: "SECRETPOLL", name: "Outro" }));
+    const poll = defaultModule("poll", () => crypto.randomUUID());
+    if (poll.kind !== "poll") assert.fail();
+    const interact = (socket: Socket, id: string, operation: unknown) =>
+      request<SharedWidget>(socket, "module-interact", {
+        id,
+        operation,
+        operationId: crypto.randomUUID(),
+      });
+    const updates = (socket: Socket, id: string) => {
+      const seen: SharedWidget[] = [];
+      socket.on(
+        "widget-updated",
+        (e: { id: string; widget: SharedWidget }) =>
+          e.id === id && seen.push(e.widget),
+      );
+      return seen;
+    };
+    for (const duration of [0, 1]) {
+      const id = crypto.randomUUID();
+      const seen = updates(other, id);
+      data(
+        await request(creator, "widget-create", {
+          id,
+          content: {
+            kind: "poll",
+            title: "Segredo",
+            blocks: [],
+            module: { ...poll, duration },
+          },
+        }),
+      );
+      data(
+        await interact(creator, id, {
+          kind: "poll-control",
+          action: "start",
+          revision: 0,
+        }),
+      );
+      const mine: SharedWidget = data(
+        await interact(guest, id, {
+          kind: "vote",
+          optionId: poll.options[1].id,
+        }),
+      );
+      assert.deepEqual(mine.moduleState?.votes, {
+        [sessions[1].id]: poll.options[1].id,
+      });
+      assert.equal(mine.moduleState?.voters, 1);
+      const snap = data(
+        await request(creator, "join", { code: "SECRETPOLL", name: "Criador" }),
+      ).snapshot as Snapshot;
+      const hidden = snap.widgets!.find((w) => w.id === id)!;
+      assert.deepEqual(hidden.moduleState?.votes, {});
+      assert.equal(hidden.moduleState?.voters, 1);
+      await new Promise((r) => setTimeout(r, 100));
+      assert.ok(seen.length >= 2);
+      assert.ok(seen.every((w) => !w.moduleState?.votes?.[sessions[1].id]));
+      if (duration) await new Promise((r) => setTimeout(r, 1200));
+      else
+        data(
+          await interact(creator, id, {
+            kind: "poll-control",
+            action: "close",
+            revision: mine.revision,
+          }),
+        );
+      await new Promise((r) => setTimeout(r, 100));
+      const revealed = seen.at(-1)!;
+      assert.equal(
+        revealed.moduleState?.votes?.[sessions[1].id],
+        poll.options[1].id,
+      );
+      assert.equal(revealed.moduleState?.voters, 1);
+    }
+  } finally {
+    sockets.forEach((s) => s.disconnect());
+    await app.close();
+  }
+});
+
+test("snapshots de sala omitem widgets, exceto para quem entra e quando widgets mudam", async () => {
+  const app = await server(),
+    sockets: Socket[] = [];
+  try {
+    const sessions = await Promise.all([
+      session(app.url),
+      session(app.url),
+      session(app.url),
+    ]);
+    for (const s of sessions) sockets.push(await connect(app.url, s.token));
+    const [creator, guest, late] = sockets;
+    data(await request(creator, "join", { code: "LEANSNAP", name: "Criador" }));
+    data(await request(guest, "join", { code: "LEANSNAP", name: "Convidado" }));
+    const snaps = (socket: Socket) => {
+      const seen: Snapshot[] = [];
+      socket.on("snapshot", (s: Snapshot) => seen.push(s));
+      return seen;
+    };
+    const guestSnaps = snaps(guest),
+      lateSnaps = snaps(late);
+    data(
+      await request(creator, "widget-create", {
+        id: crypto.randomUUID(),
+        content: { kind: "chat", title: "Chat", blocks: [] },
+      }),
+    );
+    data(await request(creator, "color", { color: "#2727F5" }));
+    data(await request(late, "join", { code: "LEANSNAP", name: "Atrasado" }));
+    const pollId = crypto.randomUUID();
+    data(
+      await request(guest, "widget-create", {
+        id: pollId,
+        content: {
+          kind: "poll",
+          title: "P",
+          blocks: [],
+          module: defaultModule("poll", () => crypto.randomUUID()),
+        },
+      }),
+    );
+    data(
+      await request(creator, "widget-review", { id: pollId, approve: true }),
+    );
+    await new Promise((r) => setTimeout(r, 100));
+    assert.ok(guestSnaps.length >= 4);
+    assert.equal(guestSnaps[0].widgets, undefined);
+    assert.equal(guestSnaps[1].widgets, undefined);
+    assert.equal(guestSnaps.at(-1)!.widgets?.length, 2);
+    assert.equal(lateSnaps[0].widgets?.length, 1);
+  } finally {
+    sockets.forEach((s) => s.disconnect());
+    await app.close();
+  }
+});
+
+test("permissões da sala: padrões, quem altera cada chave e validação de cada ação no servidor", async () => {
+  const app = await server(),
+    sockets: Socket[] = [];
+  try {
+    const sessions = await Promise.all([
+      session(app.url),
+      session(app.url),
+      session(app.url),
+    ]);
+    for (const s of sessions) sockets.push(await connect(app.url, s.token));
+    const [creator, admin, guest] = sockets;
+    const ids = sessions.map((s) => s.id);
+    const joined = data(
+      await request(creator, "join", { code: "PERMS", name: "Criador" }),
+    ).snapshot as Snapshot;
+    assert.deepEqual(joined.permissions, defaultPermissions);
+    data(await request(admin, "join", { code: "PERMS", name: "Admin" }));
+    data(await request(guest, "join", { code: "PERMS", name: "Convidado" }));
+    data(
+      await request(creator, "role", {
+        participantId: ids[1],
+        action: "promote",
+      }),
+    );
+    const denied = async (
+      socket: Socket,
+      action: string,
+      payload: unknown,
+      text?: RegExp,
+    ) => {
+      const r = await request(socket, action, payload);
+      assert.equal(r.ok, false, `${action} deveria ser recusado`);
+      if (!r.ok) {
+        assert.equal(r.code, "FORBIDDEN");
+        if (text) assert.match(r.message, text);
+      }
+    };
+    const set = (socket: Socket, permissions: Partial<RoomPermissions>) =>
+      request<RoomPermissions>(socket, "room-permissions", { permissions });
+
+    // Who flips which switch.
+    await denied(guest, "room-permissions", {
+      permissions: { guestChat: false },
+    });
+    await denied(
+      admin,
+      "room-permissions",
+      { permissions: { adminClose: false } },
+      /Só o criador/,
+    );
+    assert.equal(
+      data(await set(admin, { guestControl: true })).guestControl,
+      true,
+    );
+    data(await set(admin, { guestControl: false }));
+
+    // Media: voice and screen on by default, camera off.
+    const publish = (socket: Socket, kind: string) =>
+      request<Publication>(socket, "publish", {
+        kind,
+        key: crypto.randomUUID(),
+        audio: kind !== "camera",
+        muted: false,
+      });
+    await denied(
+      guest,
+      "publish",
+      { kind: "camera", key: crypto.randomUUID(), audio: false, muted: false },
+      /ligar a câmera/,
+    );
+    data(await publish(admin, "camera"));
+    data(await publish(guest, "voice"));
+    const screen = data(await publish(guest, "screen"));
+    const ended: string[] = [];
+    creator.on("publication-ended", (id: string) => ended.push(id));
+    data(await set(creator, { guestScreen: false }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.ok(ended.includes(screen.id));
+    await denied(
+      guest,
+      "publish",
+      { kind: "screen", key: crypto.randomUUID(), audio: true, muted: false },
+      /compartilhar tela/,
+    );
+
+    // Timer control and editing.
+    const timerId = crypto.randomUUID(),
+      blockId = crypto.randomUUID();
+    const timer = data(
+      await request<SharedWidget>(creator, "widget-create", {
+        id: timerId,
+        content: {
+          kind: "timer",
+          title: "Tempo",
+          blocks: [
+            {
+              id: blockId,
+              kind: "timer",
+              label: "Tempo",
+              duration: 60,
+              elapsed: 0,
+              startedAt: null,
+            },
+          ],
+        },
+      }),
+    );
+    const start = (socket: Socket, revision: number) =>
+      request<SharedWidget>(socket, "widget-operate", {
+        id: timerId,
+        operationId: crypto.randomUUID(),
+        operation: { kind: "timer", blockId, action: "start", revision },
+      });
+    await denied(
+      guest,
+      "widget-operate",
+      {
+        id: timerId,
+        operationId: crypto.randomUUID(),
+        operation: {
+          kind: "timer",
+          blockId,
+          action: "start",
+          revision: timer.revision,
+        },
+      },
+      /controlar widgets/,
+    );
+    data(await set(admin, { guestControl: true }));
+    const started = data(await start(guest, timer.revision));
+    await denied(
+      guest,
+      "widget-structure",
+      {
+        id: timerId,
+        revision: started.revision,
+        content: { kind: "timer", title: "Outro", blocks: started.blocks },
+      },
+      /editar widgets/,
+    );
+    data(await set(admin, { guestControl: false }));
+    data(
+      await request(creator, "widget-permission", {
+        id: timerId,
+        participantId: ids[2],
+        allowed: true,
+      }),
+    );
+    data(
+      await request(guest, "widget-operate", {
+        id: timerId,
+        operationId: crypto.randomUUID(),
+        operation: {
+          kind: "timer",
+          blockId,
+          action: "pause",
+          revision: started.revision + 1,
+        },
+      }),
+    );
+
+    // Chat.
+    const chatId = crypto.randomUUID();
+    data(
+      await request(creator, "widget-create", {
+        id: chatId,
+        content: { kind: "chat", title: "Chat", blocks: [] },
+      }),
+    );
+    data(
+      await request(guest, "chat-send", {
+        id: chatId,
+        messageId: crypto.randomUUID(),
+        text: "oi",
+      }),
+    );
+    data(await set(admin, { guestChat: false }));
+    await new Promise((r) => setTimeout(r, 750));
+    await denied(
+      guest,
+      "chat-send",
+      { id: chatId, messageId: crypto.randomUUID(), text: "oi de novo" },
+      /enviar mensagens/,
+    );
+    data(
+      await request(admin, "chat-send", {
+        id: chatId,
+        messageId: crypto.randomUUID(),
+        text: "admin fala",
+      }),
+    );
+
+    // Sharing: request (default), off, or direct.
+    const dice = () => ({
+      kind: "dice",
+      title: "Dados",
+      blocks: [],
+      module: defaultModule("dice", () => crypto.randomUUID()),
+    });
+    assert.equal(
+      data(
+        await request(guest, "widget-create", {
+          id: crypto.randomUUID(),
+          content: dice(),
+        }),
+      ).pending,
+      true,
+    );
+    data(await set(admin, { guestRequest: false }));
+    await denied(
+      guest,
+      "widget-create",
+      { id: crypto.randomUUID(), content: dice() },
+      /pedir para compartilhar/,
+    );
+    data(await set(admin, { guestShare: true }));
+    const directId = crypto.randomUUID();
+    const direct = data(
+      await request<SharedWidget>(guest, "widget-create", {
+        id: directId,
+        content: dice(),
+      }),
+    );
+    assert.equal(direct.owner, ids[2]);
+
+    // Admin switches.
+    data(await set(creator, { adminClose: false, adminCreate: false }));
+    await denied(admin, "widget-delete", { id: timerId }, /encerrar widgets/);
+    await denied(
+      admin,
+      "widget-create",
+      { id: crypto.randomUUID(), content: dice() },
+      /adicionar widgets coletivos/,
+    );
+    data(await request(guest, "widget-delete", { id: directId }));
+    data(await request(creator, "widget-delete", { id: timerId }));
   } finally {
     sockets.forEach((s) => s.disconnect());
     await app.close();

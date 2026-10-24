@@ -1,4 +1,11 @@
 import { z } from "zod";
+import {
+  moduleConfig,
+  moduleAction,
+  isModule,
+  validModule,
+  type ModuleState,
+} from "./room-modules";
 
 const identifier = z.string().uuid();
 const label = z.string().trim().min(1).max(64);
@@ -29,25 +36,53 @@ export const widgetBlock = z.discriminatedUnion("kind", [
       startedAt: z.number().finite().min(0).max(8640000000000000).nullable(),
       mode: z.enum(["up", "down"]).optional(),
       loop: z.boolean().optional(),
+      /** Someone turned the end alarm off; cleared by start, pause or reset. */
+      silenced: z.boolean().optional(),
     })
     .strict(),
 ]);
 export const widgetContent = z
   .object({
-    kind: z.enum(["custom", "notes", "timer"]).optional(),
+    kind: z
+      .enum([
+        "custom",
+        "notes",
+        "timer",
+        "chat",
+        "poll",
+        "dice",
+        "random",
+        "tasks",
+      ])
+      .optional(),
     title: label,
-    blocks: z.array(widgetBlock).min(1).max(6),
+    blocks: z.array(widgetBlock).max(6),
+    module: moduleConfig.optional(),
   })
   .strict()
   .refine((content) => {
+    if (isModule(content.kind))
+      return (
+        content.blocks.length === 0 &&
+        content.module?.kind === content.kind &&
+        validModule(content.module)
+      );
+    if (content.module) return false;
+    if (content.kind === "chat") return content.blocks.length === 0;
+    if (!content.blocks.length) return false;
     if (
       content.kind &&
       !content.blocks.every(
         (b) =>
           b.kind ===
-          ({ custom: "score", notes: "text", timer: "timer" } as const)[
-            content.kind!
-          ],
+          (
+            {
+              custom: "score",
+              notes: "text",
+              timer: "timer",
+              chat: "text",
+            } as const
+          )[content.kind as "custom" | "notes" | "timer" | "chat"],
       )
     )
       return false;
@@ -62,7 +97,7 @@ export type WidgetBlock = z.infer<typeof widgetBlock>;
 export type WidgetContent = z.infer<typeof widgetContent>;
 export function contentKind(
   content: WidgetContent,
-): "custom" | "notes" | "timer" {
+): NonNullable<WidgetContent["kind"]> {
   return (
     content.kind ||
     (content.blocks.every((b) => b.kind === "text")
@@ -72,7 +107,66 @@ export function contentKind(
         : "custom")
   );
 }
+/** Keeps the newest entries whose combined size fits the budget. */
+export function trimToBudget<T>(
+  items: T[],
+  max: number,
+  budget: number,
+  size: (item: T) => number,
+) {
+  const kept: T[] = [];
+  let used = 0;
+  for (let i = items.length - 1; i >= 0 && kept.length < max; i--) {
+    used += size(items[i]);
+    if (used > budget && kept.length) break;
+    kept.unshift(items[i]);
+  }
+  return kept;
+}
+/** Per-room memory bounds: every widget is held in memory and resent in snapshots. */
+export const chatBudget = { messages: 100, chars: 32000, widgets: 4 };
+export const historyBudget = { results: 20, chars: 8000 };
+export function trimMessages(messages: ChatMessage[]) {
+  return trimToBudget(
+    messages,
+    chatBudget.messages,
+    chatBudget.chars,
+    (m) => m.text.length + m.authorName.length,
+  );
+}
+/** Incremental chat event: only the new message travels, not the whole widget. */
+export interface ChatMessageEvent {
+  id: string;
+  revision: number;
+  message: ChatMessage;
+}
+export interface ChatMessage {
+  id: string;
+  authorId: string;
+  authorName: string;
+  color: string;
+  avatarUrl?: string;
+  text: string;
+  sentAt: number;
+}
+export interface ShareRequest {
+  id: string;
+  owner: string;
+  ownerName: string;
+  content: WidgetContent;
+  status: "pending" | "approved" | "denied";
+  createdAt: number;
+}
+export interface RoomNotice {
+  id: string;
+  text: string;
+  createdAt: number;
+}
 export interface SharedWidget extends WidgetContent {
+  moduleState?: ModuleState;
+  messages?: ChatMessage[];
+  guestEditors?: string[];
+  allGuestsEdit?: boolean;
   id: string;
   owner: string;
   revision: number;
@@ -110,14 +204,37 @@ export const widgetOperation = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("timer"),
       blockId: identifier,
-      action: z.enum(["start", "pause", "reset"]),
+      action: z.enum(["start", "pause", "reset", "silence"]),
       revision: z.number().int().nonnegative(),
     })
     .strict(),
 ]);
 export type WidgetOperation = z.infer<typeof widgetOperation>;
 export const widgetSchemas = {
-  "note-send": noteCopyInput,
+  "module-interact": z
+    .object({
+      id: identifier,
+      operationId: identifier,
+      operation: moduleAction,
+    })
+    .strict(),
+  "chat-send": z
+    .object({
+      id: identifier,
+      messageId: identifier,
+      text: z.string().trim().min(1).max(2000),
+    })
+    .strict(),
+  "widget-review": z.object({ id: identifier, approve: z.boolean() }).strict(),
+  "widget-permission": z
+    .object({
+      id: identifier,
+      participantId: identifier.optional(),
+      allGuests: z.boolean().optional(),
+      allowed: z.boolean(),
+    })
+    .strict()
+    .refine((x) => Boolean(x.participantId) !== (x.allGuests === true)),
   "widget-create": z
     .object({ id: identifier, content: widgetContent })
     .strict(),
@@ -163,6 +280,23 @@ export function timerFinished(
     timerElapsed(block, now) >= block.duration
   );
 }
+/** Alarm window shared by the room: from the end of a countdown for one minute. */
+export const timerAlarmMs = 60_000;
+/** When a running countdown ends (server time), or null if it never rings. */
+export function timerEndsAt(block: Extract<WidgetBlock, { kind: "timer" }>) {
+  return block.startedAt === null || block.loop || !block.duration
+    ? null
+    : block.startedAt + Math.max(0, block.duration - block.elapsed) * 1000;
+}
+export function timerRinging(
+  block: Extract<WidgetBlock, { kind: "timer" }>,
+  now: number,
+) {
+  const end = timerEndsAt(block);
+  return (
+    end !== null && !block.silenced && now >= end && now < end + timerAlarmMs
+  );
+}
 export function timerDisplay(
   block: Extract<WidgetBlock, { kind: "timer" }>,
   now: number,
@@ -180,7 +314,12 @@ export function operateWidget(
 ): SharedWidget {
   const block = widget.blocks.find((b) => b.id === operation.blockId);
   if (!block || block.kind !== operation.kind) throw new Error("BLOCK_MISSING");
-  if (operation.kind !== "score" && operation.revision !== widget.revision)
+  // Counting and silencing commute, so they never conflict with a newer revision.
+  if (
+    operation.kind !== "score" &&
+    !(operation.kind === "timer" && operation.action === "silence") &&
+    operation.revision !== widget.revision
+  )
     throw new Error("WIDGET_CONFLICT");
   const next: WidgetBlock =
     block.kind === "score" && operation.kind === "score"
@@ -193,17 +332,22 @@ export function operateWidget(
         }
       : block.kind === "text" && operation.kind === "text"
         ? { ...block, value: operation.value }
-        : block.kind === "timer" && operation.kind === "timer"
-          ? {
-              ...block,
-              elapsed:
-                operation.action === "reset" ||
-                (operation.action === "start" && timerFinished(block, now))
-                  ? 0
-                  : timerElapsed(block, now),
-              startedAt: operation.action === "start" ? now : null,
-            }
-          : block;
+        : block.kind === "timer" &&
+            operation.kind === "timer" &&
+            operation.action === "silence"
+          ? { ...block, silenced: true }
+          : block.kind === "timer" && operation.kind === "timer"
+            ? {
+                ...block,
+                silenced: undefined,
+                elapsed:
+                  operation.action === "reset" ||
+                  (operation.action === "start" && timerFinished(block, now))
+                    ? 0
+                    : timerElapsed(block, now),
+                startedAt: operation.action === "start" ? now : null,
+              }
+            : block;
   return {
     ...widget,
     revision: widget.revision + 1,

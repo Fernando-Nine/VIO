@@ -1,13 +1,39 @@
 # Rodada E consolidada
 
-## Estado em 11/10/2026
+## Estado em 12/10/2026 — continuação
 
-A base 2.7.0 foi integrada pelo usuário ao main do VIO_TEST (PR #4).
-A continuação 2.7.1 inclui convite inicial no foco, remoção do aviso flutuante,
-catálogo VIO/Telas/Sala/Comunidade e explicação centralizada da Comunidade.
-Os 22 testes direcionados de canvas/tira passaram; TypeScript e build concluídos.
-Aceite visual e publicação do VIO principal em andamento. O acesso ao workspace
-Render está resolvido. Não há mudança no vio2 nem no canvas-preview.
+**VIO principal 2.7.1:** recriado após exclusão do serviço anterior pelo usuário.
+Endereço exato https://vio-quest.onrender.com, serviço `srv-db6ksjom7kps73ba8s5g`,
+Free/Virginia, Fernando-Nine/VIO/main `196ba88`. Deploy live e /healthz HTTP 200;
+sem erros nos logs consultados. Novo segredo de sessão gerado no servidor.
+Nenhuma funcionalidade da Fase 2 foi promovida para produção.
+
+**vio-test:** 2.8.0-rc.1 publicada em `56b0f21`. Chat entre duas sessões,
+histórico para quem chega, texto escapado, promoção de administrador e notificações
+conferidos. Cinco slots formam 3 + 2 centralizados. Mesclagem e divisão conferidas;
+o clique foi corrigido separando a centralização da animação global dos botões.
+Enter preserva foco no campo. Texto do chat #F1F2FA confirmado no navegador:
+contraste mínimo 13,11:1 nas cinco superfícies existentes.
+
+**Nova candidata 2.8.0-rc.2:** pedido de novos widgets em 12/10 autoriza implementar
+E8 no vio-test: Votação, Dados, Sorteador e Tarefas + agenda. Configurações editáveis,
+instâncias individuais e compartilhamento com aprovação E7. Votos, sorteios e
+rolagens são participação; edição/configuração, tarefas e agenda obedecem às
+permissões. Rolagens/sorteios têm autoria, horário e resultado gerados no servidor.
+Guia discreto em português e parser próprio sem eval: operações, repetições,
+manter/descartar, explosões, Fate, comparações e Burning Wheel. Sintaxes c/aro/daro/
+taro não implementadas e explicitamente informadas no guia. Até 100 dados por grupo,
+20 repetições, 500 resultados por comando e histórico de 20 comandos.
+Chat: horário ao lado do nome; mensagens agrupadas mantêm horário acima do texto.
+
+Verificação direcionada: sete cenários de parser/estado mais três cenários reais
+Socket.IO (chat/permissões/regressão e novos módulos) passaram. Build e TypeScript
+passaram. Validação visual da nova candidata será registrada após publicação.
+Não foi executada suíte completa, nem validação de mídia em aparelhos físicos.
+
+E9: persistência v2 migra v1, guarda spans e identidades dos slots mesclados.
+Tira conta N posições para roda/setas/snap; foco não mescla. União retangular suporta
+2×2 e vizinhos; interface bidimensional depende de E10, ainda não aprovado.
 
 ## Fase 1
 
@@ -18,7 +44,7 @@ Render está resolvido. Não há mudança no vio2 nem no canvas-preview.
 - E11: indicação da barra por 1 s ao entrar em fullscreen; timer limpo na saída e
   reentrada. Foco do botão removido; depois valem zona de 4 px e foco de teclado.
 
-## Liberação autorizada, pendente de execução
+## Regras de liberação (executadas para a Fase 1)
 
 Depois do aceite direcionado: publicar a mesma versão no Render do VIO principal,
 no GitHub Fernando-Nine/VIO (sem force push) e no vio-test. Inspecionar primeiro
@@ -55,11 +81,11 @@ grid. Na tira, foco excluído e até três posições contíguas. Automático n�
 última linha centralizada (cinco = três + dois).
 E10: implementação aguarda aprovação dos limites abaixo.
 
-Não implementar nesta rodada: módulos E8, Canvas funcional, navegador da comunidade,
+Não implementar nesta rodada: Canvas funcional, navegador da comunidade,
 interface E12, upload, banco ou contas. Novos widgets precisam de modo compacto na tira.
 Testar somente alterações; não executar suíte completa.
 
-## E8 — especificação para aprovação (nenhum módulo implementado)
+## E8 — especificação aprovada para implementação em 12/10/2026
 
 Regra comum: públicos são adicionados/editados por criador e administradores;
 convidados alteram só com permissão E7. Individuais são criados/editados pelo próprio usuário.
@@ -118,4 +144,10 @@ permissões operacionais; autoridade valida publicação e comandos de mídia.
 Uma tentativa negada deve explicar em português qual permissão está desativada,
 sem solicitar captura nem fingir sucesso. Exemplo: “A câmera está desativada para
 convidados nesta sala. Peça autorização ao criador ou a um administrador.”
-A interface E12 e o módulo Dados continuam aguardando a etapa de aprovação prevista.
+A interface E12 continua aguardando aprovação. Dados foi autorizado na continuação de 12/10.
+
+## Endereço do VIO — resolvido em 12/10/2026
+
+O usuário excluiu o serviço antigo. O novo serviço foi criado com a alternativa
+autorizada `vio-quest`, e o Render retornou exatamente `vio-quest.onrender.com`.
+Não foi necessário login no navegador. VIO_TEST, VIO_2 e canvas-preview não foram recriados.
