@@ -1,13 +1,19 @@
-import { useEffect, useId, useRef, useState } from "react";
-import { Plus, Minus, Share2, Settings2, Copy, Trash2 } from "lucide-react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { Plus, Minus, Share2, Copy, Trash2, X } from "lucide-react";
 import { Dialog } from "../components/Dialog";
 import { freshKey } from "../id";
 import { NoteActions } from "./NoteActions";
+import { InlineText } from "./InlineText";
+import {
+  HeaderTools,
+  ScopeBadge,
+  useMenuItems,
+  useRename,
+} from "./header-tools";
+import { TimerBlock, timerMenu } from "./TimerBlock";
 import {
   operateWidget,
   timerElapsed,
-  timerDisplay,
-  timerFinished,
   contentKind,
   widgetContent,
   type SharedWidget,
@@ -15,6 +21,8 @@ import {
   type WidgetContent,
   type WidgetOperation,
 } from "../../shared/widgets";
+import { canEditPublic, canManageRoom } from "../../shared/permissions";
+import type { MenuItem } from "../components/ContextMenu";
 import type { Controller } from "../room/controller";
 import type { WidgetInstance } from "./model";
 
@@ -66,18 +74,15 @@ export function widgetValue(
     createdAt: raw?.createdAt || Date.now(),
   };
 }
-function clock(seconds: number) {
-  const s = Math.max(0, Math.floor(seconds));
-  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
-}
-
 function TextBlock({
   block,
+  heading,
   revision,
   save,
   engine,
 }: {
   block: Extract<WidgetBlock, { kind: "text" }>;
+  heading: ReactNode;
   revision: number;
   save: (operation: WidgetOperation) => Promise<void>;
   engine: Controller;
@@ -94,33 +99,21 @@ function TextBlock({
       setBase(revision);
     }
   }, [block.value, revision, dirty]);
+  function commit(revision: number) {
+    setBusy(true);
+    void save({ kind: "text", blockId: block.id, value: draft, revision })
+      .then(() => {
+        setDirty(false);
+        setError("");
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setBusy(false));
+  }
   return (
     <div className="widget-text">
       <div className="widget-text-heading">
-        <label htmlFor={inputId}>{block.label}</label>
-        {dirty && (
-          <button
-            className="secondary"
-            disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              void save({
-                kind: "text",
-                blockId: block.id,
-                value: draft,
-                revision: base,
-              })
-                .then(() => {
-                  setDirty(false);
-                  setError("");
-                })
-                .catch((e) => setError(e.message))
-                .finally(() => setBusy(false));
-            }}
-          >
-            Salvar texto
-          </button>
-        )}
+        {heading}
+        {busy && <span className="field-note">Salvando…</span>}
       </div>
       <NoteActions engine={engine} label={block.label} value={draft} />
       {error && (
@@ -134,22 +127,32 @@ function TextBlock({
             className="text-button"
             onClick={() => {
               setBase(revision);
-              setError("");
+              commit(revision);
             }}
           >
-            Manter meu rascunho para revisar e salvar
+            Salvar meu rascunho por cima
           </button>
         </div>
       )}
       <textarea
         id={inputId}
+        aria-label={block.label}
         maxLength={2000}
         value={draft}
-        disabled={busy}
+        readOnly={busy}
         onChange={(e) => {
           if (!dirty) setBase(revision);
           setDraft(e.target.value);
           setDirty(true);
+        }}
+        onBlur={() => {
+          if (dirty && !busy && !error) commit(base);
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== "Escape" || !dirty) return;
+          e.stopPropagation();
+          setDraft(block.value);
+          setDirty(false);
         }}
       />
     </div>
@@ -167,7 +170,7 @@ export function CustomWidget({
 }) {
   const value = widgetValue(widget, engine);
   const [now, setNow] = useState(() => engine.serverNow());
-  const [editing, setEditing] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -186,15 +189,110 @@ export function CustomWidget({
     visible,
     !!value?.blocks.some((b) => b.kind === "timer" && b.startedAt !== null),
   ]);
+  const shared = !!widget.config.sharedId;
+  const owner =
+    !!value &&
+    (!shared || canEditPublic(engine.view.snapshot, engine.view.id, value));
+  const control =
+    !!value &&
+    (!shared ||
+      canEditPublic(
+        engine.view.snapshot,
+        engine.view.id,
+        value,
+        "guestControl",
+      ));
+  useRename(
+    value && owner
+      ? (title) =>
+          saveStructure(
+            widgetContent.parse({
+              kind: value.kind,
+              title,
+              blocks: value.blocks,
+            }),
+            value.revision,
+          )
+      : undefined,
+  );
+  const timer = value?.blocks.find((b) => b.kind === "timer");
+  const addable = value?.kind === "custom" || value?.kind === "notes";
+  const removable =
+    shared &&
+    !!value &&
+    (value.owner === engine.view.id ||
+      canManageRoom(engine.view.snapshot, engine.view.id));
+  // Mirrors the header tools so narrow headers, which hide them, keep them.
+  useMenuItems(
+    value
+      ? ([
+          ...(owner && timer ? timerMenu(timer, updateTimer) : []),
+          ...(owner && addable && value.blocks.length < 6
+            ? [
+                {
+                  label:
+                    value.kind === "notes"
+                      ? "Adicionar caixa de texto"
+                      : "Adicionar contador",
+                  icon: Plus,
+                  run: addBlock,
+                },
+              ]
+            : []),
+          ...(shared
+            ? [{ label: "Criar cópia individual", icon: Copy, run: copy }]
+            : [{ label: "Compartilhar", icon: Share2, run: startShare }]),
+          ...(removable
+            ? [
+                {
+                  label: "Excluir para todos",
+                  icon: Trash2,
+                  danger: true,
+                  run: () => setConfirmDelete(true),
+                },
+              ]
+            : []),
+        ] satisfies MenuItem[])
+      : undefined,
+  );
   if (!value)
     return (
       <p className="widget-empty">
         Este widget foi encerrado ou seu estado não pôde ser restaurado.
       </p>
     );
-  const shared = !!widget.config.sharedId;
-  const owner = !shared || value.owner === engine.view.id;
+  async function saveStructure(content: WidgetContent, baseRevision: number) {
+    if (!value) return;
+    if (shared)
+      await engine.request("widget-structure", {
+        id: value.id,
+        revision: baseRevision,
+        content,
+      });
+    else {
+      const latest = engine.canvas
+        .getSnapshot()
+        .widgets.find((w) => w.id === widget.id);
+      const current = latest && widgetValue(latest, engine);
+      if (!current || current.revision !== baseRevision)
+        throw new Error(
+          "O widget mudou. Reabra a edição antes de salvar a estrutura.",
+        );
+      engine.canvas.updateWidget(widget.id, {
+        title: content.title,
+        state: {
+          ...current,
+          ...content,
+          revision: current.revision + 1,
+        },
+      });
+    }
+  }
   async function operate(operation: WidgetOperation) {
+    if (operation.kind === "timer" ? !control : !owner)
+      throw new Error(
+        "Você não tem permissão para editar este widget público. Peça ao criador ou a um administrador.",
+      );
     if (shared)
       await engine.request("widget-operate", {
         id: value!.id,
@@ -218,23 +316,96 @@ export function CustomWidget({
       }
     }
   }
+  function startShare() {
+    shareId.current ||= widget.id;
+    setSharing(true);
+  }
+  function copy() {
+    if (!value) return;
+    engine.canvas.add(
+      {
+        id: freshKey(),
+        type: widget.type,
+        title: value.title,
+        config: {},
+        state: { ...value, revision: 0 },
+      },
+      undefined,
+      true,
+    );
+  }
+  function setBlocks(blocks: WidgetBlock[]) {
+    if (!value) return;
+    const content = widgetContent.safeParse({
+      kind: value.kind,
+      title: value.title,
+      blocks,
+    });
+    if (!content.success) return setError("Confira o nome e os limites.");
+    setError("");
+    void saveStructure(content.data, value.revision).catch((e) =>
+      setError(e.message),
+    );
+  }
+  function addBlock() {
+    if (!value) return;
+    setBlocks([
+      ...value.blocks,
+      value.kind === "notes"
+        ? {
+            id: freshKey(),
+            kind: "text",
+            label: `Caixa ${value.blocks.length + 1}`,
+            value: "",
+          }
+        : { id: freshKey(), kind: "score", label: "Jogador", value: 0 },
+    ]);
+  }
+  const renameBlock = (id: string, label: string) =>
+    setBlocks(value!.blocks.map((b) => (b.id === id ? { ...b, label } : b)));
+  const blockTools = (block: WidgetBlock) =>
+    owner &&
+    value!.blocks.length > 1 && (
+      <button
+        className="icon-button block-remove"
+        aria-label={`Remover ${block.label}`}
+        title="Remover"
+        onClick={() =>
+          setBlocks(value!.blocks.filter((b) => b.id !== block.id))
+        }
+      >
+        <X size={14} />
+      </button>
+    );
+  const blockLabel = (block: WidgetBlock) => (
+    <InlineText
+      className="block-label"
+      label={`Nome de ${block.label}`}
+      value={block.label}
+      maxLength={64}
+      disabled={!owner}
+      save={(label) => renameBlock(block.id, label)}
+    />
+  );
+  function updateTimer(next: Extract<WidgetBlock, { kind: "timer" }>) {
+    if (!value) return;
+    void saveStructure(
+      widgetContent.parse({
+        kind: value.kind,
+        title: value.title,
+        blocks: value.blocks.map((b) => (b.id === next.id ? next : b)),
+      }),
+      value.revision,
+    ).catch((e) => setError(e.message));
+  }
   const act = (operation: WidgetOperation) => {
     setError("");
     void operate(operation).catch((e) => setError(e.message));
   };
   return (
-    <div className="custom-widget">
-      <div className="widget-scope">
-        <span>{shared ? "Compartilhado com a sala" : "Só para você"}</span>
-        {owner && (
-          <button
-            className="icon-button"
-            aria-label="Editar estrutura do widget"
-            onClick={() => setEditing(true)}
-          >
-            <Settings2 size={16} />
-          </button>
-        )}
+    <div className={`custom-widget kind-${value.kind || "custom"}`}>
+      <HeaderTools>
+        <ScopeBadge shared={shared} />
         {!shared && (
           <button
             className="icon-button"
@@ -243,10 +414,7 @@ export function CustomWidget({
                 ? "Compartilhar notas para editar juntos"
                 : "Compartilhar widget com a sala"
             }
-            onClick={() => {
-              shareId.current ||= widget.id;
-              setSharing(true);
-            }}
+            onClick={startShare}
           >
             <Share2 size={16} />
           </button>
@@ -255,24 +423,12 @@ export function CustomWidget({
           <button
             className="icon-button"
             aria-label="Criar cópia individual"
-            onClick={() =>
-              engine.canvas.add(
-                {
-                  id: freshKey(),
-                  type: widget.type,
-                  title: value.title,
-                  config: {},
-                  state: { ...value, revision: 0 },
-                },
-                undefined,
-                true,
-              )
-            }
+            onClick={copy}
           >
             <Copy size={16} />
           </button>
         )}
-      </div>
+      </HeaderTools>
       <div className="custom-blocks">
         {widget.config.noteSender && (
           <p className="note-origin">
@@ -285,7 +441,10 @@ export function CustomWidget({
           <section className="custom-block" key={block.id}>
             {block.kind === "score" && (
               <>
-                <strong>{block.label}</strong>
+                <div className="block-heading">
+                  {blockLabel(block)}
+                  {blockTools(block)}
+                </div>
                 <div className="widget-score">
                   <button
                     aria-label={`Diminuir ${block.label}`}
@@ -313,6 +472,12 @@ export function CustomWidget({
               (shared ? (
                 <TextBlock
                   engine={engine}
+                  heading={
+                    <div className="block-heading">
+                      {blockLabel(block)}
+                      {blockTools(block)}
+                    </div>
+                  }
                   block={block}
                   revision={value.revision}
                   save={operate}
@@ -332,8 +497,12 @@ export function CustomWidget({
                       })
                     }
                   />
+                  <div className="block-heading">
+                    {blockLabel(block)}
+                    {blockTools(block)}
+                  </div>
                   <label>
-                    {block.label}
+                    <span className="sr-only">{block.label}</span>
                     <textarea
                       maxLength={2000}
                       value={block.value}
@@ -351,50 +520,16 @@ export function CustomWidget({
                 </div>
               ))}
             {block.kind === "timer" && (
-              <>
-                <strong>{block.label}</strong>
-                <output
-                  className="widget-clock"
-                  aria-label="Tempo do cronômetro"
-                >
-                  {clock(timerDisplay(block, now))}
-                </output>
-                <div className="widget-inline-actions">
-                  <button
-                    className="secondary"
-                    onClick={() =>
-                      act({
-                        kind: "timer",
-                        blockId: block.id,
-                        action:
-                          block.startedAt === null || timerFinished(block, now)
-                            ? "start"
-                            : "pause",
-                        revision: value.revision,
-                      })
-                    }
-                  >
-                    {timerFinished(block, now)
-                      ? "Reiniciar"
-                      : block.startedAt === null
-                        ? "Iniciar"
-                        : "Pausar"}
-                  </button>
-                  <button
-                    className="text-button"
-                    onClick={() =>
-                      act({
-                        kind: "timer",
-                        blockId: block.id,
-                        action: "reset",
-                        revision: value.revision,
-                      })
-                    }
-                  >
-                    Zerar
-                  </button>
-                </div>
-              </>
+              <TimerBlock
+                block={block}
+                now={now}
+                engine={engine}
+                editable={owner}
+                controllable={control}
+                revision={value.revision}
+                act={act}
+                update={updateTimer}
+              />
             )}
           </section>
         ))}
@@ -413,47 +548,33 @@ export function CustomWidget({
             mudar a estrutura.
           </p>
         )}
-      {editing && (
-        <StructureEditor
-          value={value}
-          kind={widget.type}
-          shared={shared}
-          close={() => setEditing(false)}
-          save={async (content, baseRevision) => {
-            if (shared)
-              await engine.request("widget-structure", {
-                id: value.id,
-                revision: baseRevision,
-                content,
-              });
-            else {
-              const latest = engine.canvas
-                .getSnapshot()
-                .widgets.find((w) => w.id === widget.id);
-              const current = latest && widgetValue(latest, engine);
-              if (!current || current.revision !== baseRevision)
-                throw new Error(
-                  "O widget mudou. Reabra a edição antes de salvar a estrutura.",
-                );
-              engine.canvas.updateWidget(widget.id, {
-                title: content.title,
-                state: {
-                  ...current,
-                  ...content,
-                  revision: current.revision + 1,
-                },
-              });
-            }
-          }}
-          remove={
-            shared
-              ? async () => {
-                  await engine.request("widget-delete", { id: value.id });
-                  engine.canvas.remove(widget.id);
-                }
-              : undefined
-          }
-        />
+      {confirmDelete && (
+        <Dialog
+          title="Excluir este widget para todos?"
+          close={() => setConfirmDelete(false)}
+        >
+          <p>
+            O conteúdo será removido desta sala. As cópias individuais continuam
+            existindo.
+          </p>
+          <button
+            className="danger"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void engine
+                .request("widget-delete", { id: value.id })
+                .then(() => engine.canvas.remove(widget.id))
+                .catch((e) => setError(e.message))
+                .finally(() => {
+                  setBusy(false);
+                  setConfirmDelete(false);
+                });
+            }}
+          >
+            Excluir para todos
+          </button>
+        </Dialog>
       )}
       {sharing && (
         <Dialog
@@ -465,9 +586,8 @@ export function CustomWidget({
           close={() => setSharing(false)}
         >
           <p>
-            O conteúdo ficará visível para todos nesta sala. Todos poderão usar
-            os blocos; só você poderá mudar a estrutura ou excluir o widget
-            compartilhado.
+            O conteúdo ficará disponível na sala. Convidados precisam de
+            aprovação para compartilhar. A edição pública exige permissão.
           </p>
           <p className="field-note">
             A sala guarda esses dados temporariamente. Eles desaparecem quando a
@@ -482,15 +602,28 @@ export function CustomWidget({
               setBusy(true);
               setError("");
               void engine
-                .request<SharedWidget>("widget-create", {
-                  id: shareId.current,
-                  content: {
-                    kind: value.kind,
-                    title: value.title,
-                    blocks: value.blocks,
+                .request<SharedWidget | { id: string; pending: true }>(
+                  "widget-create",
+                  {
+                    id: shareId.current,
+                    content: {
+                      kind: value.kind,
+                      title: value.title,
+                      blocks: value.blocks,
+                    },
                   },
-                })
+                )
                 .then((result) => {
+                  if ("pending" in result) {
+                    engine.canvas.updateWidget(widget.id, {
+                      config: { ...widget.config, pendingShareId: result.id },
+                    });
+                    setSharing(false);
+                    setError(
+                      "Pedido enviado ao criador e aos administradores.",
+                    );
+                    return;
+                  }
                   engine.receiveSharedWidget(result);
                   engine.canvas.bindShared(widget.id, result.id);
                   setSharing(false);
@@ -504,249 +637,5 @@ export function CustomWidget({
         </Dialog>
       )}
     </div>
-  );
-}
-
-function StructureEditor({
-  value,
-  kind,
-  shared,
-  close,
-  save,
-  remove,
-}: {
-  value: SharedWidget;
-  kind: string;
-  shared: boolean;
-  close: () => void;
-  save: (value: WidgetContent, revision: number) => Promise<void>;
-  remove?: () => Promise<void>;
-}) {
-  const [baseRevision] = useState(value.revision);
-  const [draft, setDraft] = useState<WidgetContent>(() =>
-    structuredClone({
-      kind: value.kind,
-      title: value.title,
-      blocks: value.blocks,
-    }),
-  );
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  function patch(id: string, change: Partial<WidgetBlock>) {
-    setDraft((d) => ({
-      ...d,
-      blocks: d.blocks.map((b) =>
-        b.id === id ? ({ ...b, ...change } as WidgetBlock) : b,
-      ),
-    }));
-  }
-  return (
-    <Dialog
-      title={
-        kind === "timer"
-          ? "Personalizar cronômetro"
-          : kind === "notes"
-            ? "Personalizar notas"
-            : "Personalizar placar"
-      }
-      close={close}
-    >
-      <label>
-        Título
-        <input
-          value={draft.title}
-          maxLength={64}
-          onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-        />
-      </label>
-      {draft.blocks.map((block) => (
-        <fieldset key={block.id}>
-          <legend>
-            {block.kind === "score"
-              ? "Placar"
-              : block.kind === "text"
-                ? "Texto"
-                : "Cronômetro"}
-          </legend>
-          <label>
-            Nome
-            <input
-              maxLength={64}
-              value={block.label}
-              onChange={(e) => patch(block.id, { label: e.target.value })}
-            />
-          </label>
-          {block.kind === "timer" && (
-            <>
-              <label>
-                Contagem
-                <select
-                  aria-label="Modo de contagem"
-                  value={block.mode || (block.duration ? "down" : "up")}
-                  onChange={(e) =>
-                    patch(block.id, {
-                      mode: e.target.value as "up" | "down",
-                      duration:
-                        e.target.value === "down"
-                          ? block.duration || 1500
-                          : block.duration,
-                      elapsed: 0,
-                      startedAt: null,
-                    })
-                  }
-                >
-                  <option value="down">Regressiva</option>
-                  <option value="up">Progressiva</option>
-                </select>
-              </label>
-              <label>
-                {block.mode === "up"
-                  ? "Meta em minutos · 0 para contar livremente"
-                  : "Duração em minutos"}
-                <input
-                  type="number"
-                  aria-label="Duração ou meta em minutos"
-                  min={block.mode === "up" ? 0 : 1}
-                  max={1440}
-                  step={1}
-                  value={block.duration / 60}
-                  onChange={(e) =>
-                    patch(block.id, {
-                      duration: Math.round(Number(e.target.value) * 60),
-                      loop: Number(e.target.value) > 0 && block.loop,
-                      elapsed: 0,
-                      startedAt: null,
-                    })
-                  }
-                />
-              </label>
-              <label className="toggle">
-                <span>
-                  Repetir ao atingir o final
-                  <small>
-                    Na contagem progressiva, defina uma meta para repetir.
-                  </small>
-                </span>
-                <input
-                  type="checkbox"
-                  role="switch"
-                  checked={!!block.loop}
-                  disabled={!block.duration}
-                  onChange={(e) =>
-                    patch(block.id, {
-                      loop: e.target.checked,
-                      elapsed: 0,
-                      startedAt: null,
-                    })
-                  }
-                />
-              </label>
-            </>
-          )}
-          <button
-            className="text-button"
-            disabled={draft.blocks.length === 1}
-            onClick={() =>
-              setDraft({
-                ...draft,
-                blocks: draft.blocks.filter((b) => b.id !== block.id),
-              })
-            }
-          >
-            Remover bloco
-          </button>
-        </fieldset>
-      ))}
-      {kind === "custom" && (
-        <button
-          className="secondary"
-          disabled={draft.blocks.length >= 6}
-          onClick={() =>
-            setDraft({
-              ...draft,
-              blocks: [
-                ...draft.blocks,
-                { id: freshKey(), kind: "score", label: "Jogador", value: 0 },
-              ],
-            })
-          }
-        >
-          + Contador de pontos
-        </button>
-      )}
-      {kind === "notes" && (
-        <button
-          className="secondary"
-          disabled={draft.blocks.length >= 6}
-          onClick={() =>
-            setDraft({
-              ...draft,
-              blocks: [
-                ...draft.blocks,
-                {
-                  id: freshKey(),
-                  kind: "text",
-                  label: `Caixa ${draft.blocks.length + 1}`,
-                  value: "",
-                },
-              ],
-            })
-          }
-        >
-          + Caixa de texto
-        </button>
-      )}
-      {error && <p role="alert">{error}</p>}
-      <button
-        className="primary"
-        disabled={busy}
-        onClick={() => {
-          const result = widgetContent.safeParse(draft);
-          if (!result.success) {
-            setError("Confira os nomes dos blocos e os limites do cronômetro.");
-            return;
-          }
-          setBusy(true);
-          void save(result.data, baseRevision)
-            .then(close)
-            .catch((e) => setError(e.message))
-            .finally(() => setBusy(false));
-        }}
-      >
-        Salvar estrutura{shared ? " para a sala" : ""}
-      </button>
-      {remove && (
-        <div className="widget-delete">
-          <button
-            className="text-button"
-            onClick={() => setConfirmDelete(true)}
-          >
-            <Trash2 size={15} /> Excluir para todos
-          </button>
-          {confirmDelete && (
-            <>
-              <p>
-                O conteúdo será removido desta sala. As cópias individuais
-                continuam existindo.
-              </p>
-              <button
-                className="danger"
-                disabled={busy}
-                onClick={() => {
-                  setBusy(true);
-                  void remove()
-                    .then(close)
-                    .catch((e) => setError(e.message))
-                    .finally(() => setBusy(false));
-                }}
-              >
-                Confirmar exclusão do widget
-              </button>
-            </>
-          )}
-        </div>
-      )}
-    </Dialog>
   );
 }

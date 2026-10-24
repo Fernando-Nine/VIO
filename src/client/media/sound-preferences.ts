@@ -39,6 +39,31 @@ export const soundEvents = [
     label: "Voltar a ouvir",
     description: "Ao reativar o áudio da sala.",
   },
+  {
+    cue: "screen-new",
+    label: "Nova transmissão",
+    description: "Quando outra pessoa começa a compartilhar a tela.",
+  },
+  {
+    cue: "chat-message",
+    label: "Nova mensagem",
+    description: "Mensagens de outras pessoas no chat, no máximo a cada 4 s.",
+  },
+  {
+    cue: "poll-open",
+    label: "Votação aberta",
+    description: "Quando uma votação começa.",
+  },
+  {
+    cue: "poll-end",
+    label: "Fim da votação",
+    description: "Quando a votação termina e o vencedor aparece.",
+  },
+  {
+    cue: "timer-end",
+    label: "Fim do cronômetro",
+    description: "Quando um cronômetro chega ao final.",
+  },
 ] as const;
 export type Cue = (typeof soundEvents)[number]["cue"];
 export type SoundEvents = Record<Cue, boolean>;

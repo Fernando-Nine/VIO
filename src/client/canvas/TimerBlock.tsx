@@ -1,0 +1,287 @@
+import { useEffect, useState } from "react";
+import { ArrowLeftRight, BellOff, Repeat } from "lucide-react";
+import type { MenuItem } from "../components/ContextMenu";
+import {
+  timerDisplay,
+  timerElapsed,
+  timerAlarmMs,
+  timerEndsAt,
+  timerFinished,
+  type WidgetBlock,
+  type WidgetOperation,
+} from "../../shared/widgets";
+import type { Controller } from "../room/controller";
+
+type Timer = Extract<WidgetBlock, { kind: "timer" }>;
+const modeName = { down: "Temporizador", up: "Cronômetro" } as const;
+
+export function clock(seconds: number) {
+  const s = Math.max(0, Math.floor(seconds));
+  const mm = `${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${mm}` : mm;
+}
+
+/** Accepts "25" (minutes), "mm:ss" or "h:mm:ss"; null when not a valid length. */
+export function parseClock(text: string): number | null {
+  const parts = text.trim().split(":");
+  if (parts.length > 3 || parts.some((p) => !/^\d{1,4}$/.test(p.trim())))
+    return null;
+  const values = parts.map(Number);
+  const seconds =
+    values.length === 1
+      ? values[0] * 60
+      : values.reduce((total, v) => total * 60 + v, 0);
+  return seconds > 0 && seconds <= 86400 ? seconds : null;
+}
+
+const ringEvery = 1_200;
+
+/**
+ * Rings for every viewer, even while the widget is off screen. The alarm is
+ * part of the widget's state: it rings from the end of a countdown until
+ * anyone turns it off (for a room widget, for the whole room) or a minute
+ * passes. A repeating countdown chimes once per lap instead.
+ */
+function useEndAlarm(block: Timer, engine: Controller) {
+  const { startedAt, elapsed, duration, loop, silenced } = block;
+  const end = timerEndsAt(block);
+  const [ringing, setRinging] = useState(false);
+  useEffect(() => {
+    if (startedAt === null || !duration || !loop) return;
+    const done = timerElapsed(
+      { ...block, startedAt, elapsed, duration, loop },
+      engine.serverNow(),
+    );
+    let repeat: ReturnType<typeof setInterval> | undefined;
+    const first = setTimeout(
+      () => {
+        void engine.playCue("timer-end");
+        repeat = setInterval(
+          () => void engine.playCue("timer-end"),
+          duration * 1000,
+        );
+      },
+      (duration - done) * 1000,
+    );
+    return () => {
+      clearTimeout(first);
+      clearInterval(repeat);
+    };
+    // The block object changes on every revision; only timing fields matter.
+  }, [startedAt, elapsed, duration, loop, engine]);
+  useEffect(() => {
+    if (end === null || silenced) return;
+    const now = engine.serverNow();
+    if (now >= end + timerAlarmMs) return;
+    let ring: ReturnType<typeof setInterval> | undefined;
+    const begin = setTimeout(
+      () => {
+        setRinging(true);
+        void engine.playCue("timer-end");
+        ring = setInterval(() => void engine.playCue("timer-end"), ringEvery);
+      },
+      Math.max(0, end - now),
+    );
+    const stop = setTimeout(
+      () => {
+        clearInterval(ring);
+        setRinging(false);
+      },
+      end + timerAlarmMs - now,
+    );
+    return () => {
+      clearTimeout(begin);
+      clearTimeout(stop);
+      clearInterval(ring);
+      setRinging(false);
+    };
+  }, [end, silenced, engine]);
+  return ringing;
+}
+
+const switchedMode = (block: Timer): Timer => {
+  const other =
+    (block.mode || (block.duration ? "down" : "up")) === "down" ? "up" : "down";
+  return {
+    ...block,
+    elapsed: 0,
+    startedAt: null,
+    mode: other,
+    duration: other === "down" ? block.duration || 1500 : 0,
+    loop: other === "down" && !!block.loop,
+  };
+};
+
+/** Mode and repeat, for the header menu when the space is too small to show them. */
+export function timerMenu(
+  block: Timer,
+  update: (next: Timer) => void,
+): MenuItem[] {
+  const mode = block.mode || (block.duration ? "down" : "up");
+  return [
+    {
+      label: `Trocar para ${modeName[mode === "down" ? "up" : "down"]}`,
+      icon: ArrowLeftRight,
+      run: () => update(switchedMode(block)),
+    },
+    ...(mode === "down"
+      ? [
+          {
+            label: block.loop ? "Não repetir" : "Repetir ao chegar ao final",
+            icon: Repeat,
+            run: () => update({ ...block, loop: !block.loop }),
+          },
+        ]
+      : []),
+  ];
+}
+
+export function TimerBlock({
+  block,
+  now,
+  engine,
+  editable,
+  controllable,
+  act,
+  update,
+  revision,
+}: {
+  block: Timer;
+  revision: number;
+  now: number;
+  engine: Controller;
+  editable: boolean;
+  /** Start, pause, reset and the alarm; the room may allow this without editing. */
+  controllable: boolean;
+  act: (operation: WidgetOperation) => void;
+  update: (next: Timer) => void;
+}) {
+  const [editingTime, setEditingTime] = useState(false);
+  const ringing = useEndAlarm(block, engine);
+  const mode = block.mode || (block.duration ? "down" : "up");
+  const other = mode === "down" ? "up" : "down";
+  const finished = timerFinished(block, now);
+  const running = block.startedAt !== null && !finished;
+  const stopped = { elapsed: 0, startedAt: null };
+  const timeEditable = editable && mode === "down" && !running;
+  function commitTime(input: HTMLInputElement) {
+    setEditingTime(false);
+    const seconds = parseClock(input.value);
+    if (seconds !== null && seconds !== block.duration)
+      update({ ...block, ...stopped, duration: seconds });
+  }
+  return (
+    <div className={`timer-face ${ringing ? "is-ringing" : ""}`}>
+      {editable ? (
+        <div className="timer-modes" role="group" aria-label="Modo">
+          <button
+            className="timer-mode"
+            aria-label={`Modo ${modeName[mode]}. Trocar para ${modeName[other]}`}
+            title={`Trocar para ${modeName[other]}`}
+            onClick={() => update(switchedMode(block))}
+          >
+            <ArrowLeftRight size={13} aria-hidden="true" />
+            {modeName[mode]}
+          </button>
+          {mode === "down" && (
+            <button
+              className="icon-button"
+              aria-pressed={!!block.loop}
+              aria-label="Repetir ao chegar ao final"
+              title="Repetir ao chegar ao final"
+              onClick={() => update({ ...block, loop: !block.loop })}
+            >
+              <Repeat size={15} />
+            </button>
+          )}
+        </div>
+      ) : (
+        <small className="timer-mode-label">
+          {modeName[mode]}
+          {block.loop && " · repete"}
+        </small>
+      )}
+      {timeEditable && editingTime ? (
+        <input
+          className="widget-clock timer-input"
+          aria-label="Duração em minutos ou mm:ss"
+          defaultValue={clock(block.duration)}
+          autoFocus
+          inputMode="numeric"
+          onFocus={(e) => e.currentTarget.select()}
+          onBlur={(e) => commitTime(e.currentTarget)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape")
+              e.currentTarget.value = clock(block.duration);
+            if (e.key === "Enter" || e.key === "Escape") {
+              e.stopPropagation();
+              e.currentTarget.blur();
+            }
+          }}
+        />
+      ) : timeEditable ? (
+        <button
+          className="widget-clock timer-edit"
+          title="Clique para editar o tempo"
+          aria-label={`Tempo ${clock(timerDisplay(block, now))}. Editar duração`}
+          onClick={() => setEditingTime(true)}
+        >
+          {clock(timerDisplay(block, now))}
+        </button>
+      ) : (
+        <output className="widget-clock" aria-label="Tempo do cronômetro">
+          {clock(timerDisplay(block, now))}
+        </output>
+      )}
+      {controllable && (
+        <div className="widget-inline-actions">
+          {ringing && (
+            <button
+              className="primary timer-silence"
+              onClick={() =>
+                act({
+                  kind: "timer",
+                  blockId: block.id,
+                  action: "silence",
+                  revision,
+                })
+              }
+            >
+              <BellOff size={16} aria-hidden="true" />
+              Desligar alarme
+            </button>
+          )}
+          <button
+            className="secondary"
+            onClick={() =>
+              act({
+                kind: "timer",
+                blockId: block.id,
+                action:
+                  block.startedAt === null || finished ? "start" : "pause",
+                revision,
+              })
+            }
+          >
+            {finished ? "Reiniciar" : running ? "Pausar" : "Iniciar"}
+          </button>
+          {(block.elapsed > 0 || block.startedAt !== null) && (
+            <button
+              className="text-button"
+              onClick={() =>
+                act({
+                  kind: "timer",
+                  blockId: block.id,
+                  action: "reset",
+                  revision,
+                })
+              }
+            >
+              Zerar
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

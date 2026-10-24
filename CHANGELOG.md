@@ -2,12 +2,68 @@
 
 > **MUDANÇA DE SISTEMA NA 2.0.0:** nova implementação, criada do zero. O histórico anterior foi preservado integralmente a partir somente do CHANGELOG.md de Fernando-Nine/VIO_2.
 
+## [2.8.0] - 2026-10-24
+
+Chat, papéis na sala e novos widgets
+
+### Sala e pessoas
+- Chat público no lugar das Notas, com autoria, horários agrupados, emojis e Shift+Enter para nova linha.
+- Papéis na sala: criador, administradores e convidados. O painel Pessoas tem chaves de permissão e ações ao passar o mouse ou no botão direito; o servidor confere cada permissão.
+- Se o criador sair, a posse vai para um administrador online, depois para quem estiver online.
+- Notificações de telas, widgets, mensagens e pedidos na barra, com sons para transmissão nova e mensagem nova.
+
+### Widgets
+- Novos: Votação, Dados, Sorteador e Tarefas com agenda, para uso individual ou compartilhado.
+- Cabeçalho compacto: renomeie no título e use o botão direito para as demais ações. Edições salvam ao sair do campo.
+- Widgets se adaptam ao espaço, sem rolagem no pequeno e sem vazio no grande.
+- Votação é montada no próprio widget e só mostra os votos ao encerrar, destacando a vencedora.
+- Cronômetro editado no lugar; o alarme toca até alguém desligar, por no máximo um minuto, e desliga para todos.
+
+### Interface e estabilidade
+- O canvas ocupa toda a área da sala; espaços vazios da tira podem ser mesclados. No celular, o cabeçalho fica compacto.
+- Mídia mais estável em reconexões rápidas, menos tráfego no chat e memória da sala limitada.
+
+## [2.8.0-rc.3] - 2026-10-23
+
+Prévia · Interface mais enxuta e sons
+
+### Somente no vio-test
+- O canvas ocupa toda a área da sala. No celular, o cabeçalho fica compacto. As setas da tira aparecem só ao passar o mouse.
+- Widgets com cabeçalho compacto: renomeie no próprio título e use o botão direito para as demais ações. Clicar não solta mais o widget do lugar.
+- Cronômetro: edite o tempo direto no widget, veja o modo e a repetição, e ouça um aviso ao terminar.
+- Chat agrupa horários, tem botão de enviar maior e um seletor leve de emojis.
+- Sons para votação aberta, transmissão nova e mensagem nova. Ao encerrar, a votação destaca a vencedora. Indicador de transmissão ao vivo na barra.
+- Dados começa com o campo vazio e uma sugestão; reiniciar fica no menu do cabeçalho.
+- Pessoas: ações ao passar o mouse e no botão direito. Notificações sem botão de fechar; Widget na barra sempre abre o catálogo.
+- Correções: mídia mais estável em reconexões rápidas, memória da sala limitada e sucessão do criador prefere quem está online.
+
+## [2.8.0-rc.2] - 2026-10-12
+
+Prévia · Novos widgets da sessão
+
+### Somente no vio-test
+- Votação, Dados, Sorteador e Tarefas + agenda: uso individual ou compartilhado, edição por permissão e modo compacto.
+- Dados com comandos, guia em português e mini-histórico atribuído a quem rolou. Sorteio com pesos e retirada opcional de resultados.
+- Votação com opções, duração e um voto por pessoa. Agenda com responsáveis, etapas e tempo compartilhado.
+- Chat mostra o horário ao lado do nome, acima do texto da mensagem.
+
+## [2.8.0-rc.1] - 2026-10-11
+
+Prévia · Chat, papéis e espaços mesclados
+
+### Somente no vio-test
+- Notas e cópias recebidas dão lugar ao Chat público, com histórico temporário, autoria e notificações. Canvas aparece apenas como Em breve.
+- Criador e administradores gerenciam widgets públicos. Convidados pedem aprovação para compartilhar e recebem permissões de edição por pessoa ou por widget.
+- Pessoas permite promover, revogar e transferir a posse. Saída do criador promove o administrador mais antigo, ou o convidado mais antigo.
+- Notificações reúnem telas, widgets, mensagens e pedidos na barra sem abrir a barra recolhida automaticamente.
+- Espaços vazios da tira podem ser mesclados até três posições e divididos novamente. O automático centraliza a última linha. Grid personalizado continua aguardando aprovação.
+
 ## [2.7.2] - 2026-10-23
 
 Correção de segurança
 
 ### Segurança
-- Atualização de uma biblioteca do servidor que permitia disfarçar o endereço de rede e contornar os limites de uso por conexão.
+- Dependência proxy-addr atualizada para 2.0.8, fechando uma falha que permitia falsificar o endereço de origem.
 
 ## [2.7.1] - 2026-10-11
 

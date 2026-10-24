@@ -99,7 +99,7 @@ input[type="checkbox"] {
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 0 12px;
+  padding: 0;
   min-height: 0;
 }
 .in-room .room-heading {
@@ -151,8 +151,9 @@ input[type="checkbox"] {
   min-height: 0;
   max-height: none;
   aspect-ratio: auto;
-  border-radius: 10px;
-  border-color: #303244;
+  /* Edge to edge: the header and footer lines already frame the canvas. */
+  border: 0;
+  border-radius: 0;
   background: #080910;
   box-shadow: none;
 }
@@ -316,7 +317,7 @@ input[type="checkbox"] {
 }
 .in-room .dock {
   position: absolute;
-  bottom: 12px;
+  bottom: calc(12px + var(--dock-lift, 0px));
   left: 50%;
   transform: translateX(-50%);
   width: max-content;
@@ -361,6 +362,7 @@ input[type="checkbox"] {
 }
 .in-room .app-footer {
   flex: 0 0 30px;
+  border-top: 1px solid var(--line);
   min-height: 30px;
   padding: 0 22px;
   gap: 8px;
@@ -602,8 +604,13 @@ input[type="checkbox"] {
   .in-room .invite > span {
     display: none;
   }
-  .in-room .room {
-    padding: 0 6px;
+  /* A truncated code is useless: keep only the copy button. */
+  .in-room .room-code > span,
+  .in-room .connection .ping-source {
+    display: none;
+  }
+  .in-room .connection .ping-value {
+    white-space: nowrap;
   }
   .in-room .room-heading {
     padding: 0 7px;
@@ -614,9 +621,6 @@ input[type="checkbox"] {
   }
   .in-room .room-heading h1 {
     display: none;
-  }
-  .in-room .player {
-    border-radius: 7px;
   }
   .in-room .player-top {
     padding: 12px;

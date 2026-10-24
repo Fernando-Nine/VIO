@@ -17,6 +17,7 @@ import {
 } from "../src/shared/protocol";
 import {
   readSoundEvents,
+  soundEvents,
   volumePreference,
 } from "../src/client/media/sound-preferences";
 import { presenceCues } from "../src/client/room/presence-cues";
@@ -69,7 +70,7 @@ test("preferências de som migram valores antigos e limitam volumes inválidos",
   assert.equal(events["room-enter"], false);
   assert.equal(events.mute, false);
   assert.equal(events["share-on"], true);
-  assert.equal(Object.keys(events).length, 8);
+  assert.equal(Object.keys(events).length, soundEvents.length);
   assert.equal(volumePreference(0, 1), 0);
   assert.equal(volumePreference(8, 1), 1);
   assert.equal(volumePreference(-5, 1), 0);
@@ -125,4 +126,24 @@ test("sons de presença ignoram duplicatas, quedas, reconexões e troca de inst�
     [],
   );
   assert.deepEqual(presenceCues(a, snapshot([person("friend")]), "self"), []);
+});
+
+test("som de transmissão nova só para telas de outras pessoas", () => {
+  const screen = (owner: string, id: string): Participant => ({
+    ...person(owner),
+    publications: [
+      { id, owner, kind: "screen", key: id, audio: false, muted: false },
+    ],
+  });
+  const a = snapshot([person("self"), person("friend")]);
+  assert.deepEqual(
+    presenceCues(a, snapshot([person("self"), screen("friend", "s1")]), "self"),
+    ["screen-new"],
+  );
+  assert.deepEqual(
+    presenceCues(a, snapshot([screen("self", "s2"), person("friend")]), "self"),
+    [],
+  );
+  const live = snapshot([person("self"), screen("friend", "s1")]);
+  assert.deepEqual(presenceCues(live, live, "self"), []);
 });
