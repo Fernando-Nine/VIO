@@ -2,6 +2,7 @@ import { Fault } from "./security";
 import { randomInt } from "node:crypto";
 import {
   applyModuleAction,
+  moduleResets,
   type ModuleActor,
   type ModuleAction,
 } from "../shared/room-modules";
@@ -47,7 +48,7 @@ export class RoomWidgets {
     )
       throw new Fault(
         "WIDGET_LIMIT",
-        "Limite de widgets compartilhados atingido: até 6 por criador e 32 na sala.",
+        "Limite de widgets da sala atingido: até 6 por criador e 32 na sala.",
       );
     if (
       content.kind === "chat" &&
@@ -110,8 +111,7 @@ export class RoomWidgets {
       ...current,
       ...content,
       revision: current.revision + 1,
-      ...(content.module &&
-      JSON.stringify(content.module) !== JSON.stringify(current.module)
+      ...(content.module && moduleResets(current.module, content.module)
         ? { moduleState: {} }
         : {}),
     };
@@ -189,10 +189,11 @@ export class RoomWidgets {
     const key = `${actor.id}:${id}:${operationId}`;
     if (this.operations.has(key)) return current;
     const now = Date.now(),
-      throttle = `module:${actor.id}`;
+      // Per widget: rolling dice right after a draw elsewhere is normal use.
+      throttle = `module:${actor.id}:${id}`;
     if (
       (operation.kind === "roll" || operation.kind === "draw") &&
-      now - (this.lastMessages.get(throttle) || 0) < 700
+      now - (this.lastMessages.get(throttle) || 0) < 300
     )
       throw new Fault(
         "RATE_LIMIT",

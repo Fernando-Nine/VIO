@@ -4,6 +4,8 @@ import { mediaDeadline } from "./deadline";
 export interface CaptureAdapter {
   screen(audio: boolean): Promise<MediaStream>;
   device(constraints: MediaStreamConstraints): Promise<MediaStream>;
+  stopScreen?(): void;
+  screenAudioMessage?(): string;
 }
 export const browserCapture: CaptureAdapter = {
   screen: (audio) =>
@@ -65,6 +67,8 @@ export class Captures {
   threshold = -55;
   manualGain = 1;
   voiceLevel = 0;
+  /** Raw input level in dB, before the gate; drives the settings meter. */
+  inputDb = -100;
   voiceSettings = {
     echoCancellation: true,
     noiseSuppression: true,
@@ -150,6 +154,8 @@ export class Captures {
     if (surface === "monitor" && hasAudio)
       this.audioMessage +=
         " O som do sistema pode incluir a conversa desta sala; prefira uma aba ou use fones.";
+    if (this.adapter.screenAudioMessage)
+      this.audioMessage = this.adapter.screenAudioMessage();
     this.save("screen", stream);
     await this.applyQuality(this.quality);
   }
@@ -203,6 +209,7 @@ export class Captures {
         buffer.reduce((sum, v) => sum + v * v, 0) / buffer.length,
       );
       const db = 20 * Math.log10(rms + 1e-8);
+      this.inputDb = db;
       if (db > this.threshold) hold = Date.now() + 180;
       const next = Date.now() < hold && !this.micMuted && !this.deaf;
       if (next !== open) {
@@ -411,7 +418,10 @@ export class Captures {
     const source = this.sources.get(kind);
     this.sources.delete(kind);
     source?.stream.getTracks().forEach((t) => t.stop());
-    if (kind === "screen") this.stopPreview();
+    if (kind === "screen") {
+      this.adapter.stopScreen?.();
+      this.stopPreview();
+    }
     if (kind === "voice") {
       clearInterval(this.voiceTimer);
       this.rawVoice?.getTracks().forEach((t) => t.stop());
@@ -424,6 +434,7 @@ export class Captures {
       this.rawVoice = undefined;
       this.context = undefined;
       this.voiceLevel = 0;
+      this.inputDb = -100;
     }
     this.changed(kind, true);
   }
