@@ -7,21 +7,89 @@ export interface Release {
   systemChange?: boolean;
   sections: { title: string; items: string[] }[];
 }
-export const version = "2.8.1";
+export const version = "2.9.0";
 export const currentRelease: Release = {
   version,
+  date: "2026-10-27",
+  title: "Visual novo dos widgets, pessoas e notificações",
+  sections: [
+    {
+      title: "Widgets",
+      items: [
+        "Cronômetro em anel com atalhos de 5, 10 e 25 minutos, voltas compartilhadas e alarme com Desligar para a sala.",
+        "Votação com linha do prazo, rostos de quem votou (nunca em quê) e resultado em barras, pizza ou só a vencedora.",
+        "Dados com teclado de ícones (d4 a d20), crítico no 20 natural e muitos dados em fichas compactas, sem nada cortado.",
+        "Sorteador em roleta que para na opção sorteada para todos, com cores e paletas compartilhadas.",
+        "Cor no Cronômetro e no Personalizado, e cor e paleta na Votação, pelo menu do botão direito.",
+        "Widget pessoal ou da sala, escolhido ao criar; o cabeçalho mostra quem controla e o menu do botão direito segue a mesma ordem em todos.",
+        "Modo Tira: arraste um widget ao longo da tira para mudar a ordem.",
+      ],
+    },
+    {
+      title: "Sala e pessoas",
+      items: [
+        "Pessoas num painel lateral com quem fala, quem está sem microfone e quem transmite, e menu de cada pessoa com volume até 200% e Assistir a tela.",
+        "Silenciar para mim, e, para o dono da sala, Silenciar para todos e Liberar voz.",
+        "Tela nova aparece como etiqueta no canto, com ícone ao vivo das telas no ar e sino com histórico.",
+        "Ajustes numa janela com lista lateral: Áudio, Vídeo, Aparência e sons e, para criador e admins, Sala.",
+      ],
+    },
+    {
+      title: "Chamada e telas",
+      items: [
+        "Doca fixa no rodapé com Entrar na chamada, Compartilhar e Flutuante juntos à esquerda; no celular, barra de abas.",
+        "Cada tela tem o seu volume no próprio cabeçalho, também em tela cheia e na janela flutuante.",
+        "Em tela cheia, bordas e controles somem quando você para de mexer.",
+        "Aviso de muitas ações seguidas não aparece mais com uso normal dos widgets.",
+      ],
+    },
+  ],
+};
+const widgetsPreviewRelease: Release = {
+  version: "2.9.0-rc.20",
+  date: "2026-10-26",
+  title: "Prévia · Visual novo dos widgets",
+  sections: [
+    {
+      title: "Somente no vio-test",
+      items: [
+        "Cronômetro em anel: o anel mostra o tempo que resta, atalhos de 5, 10 e 25 minutos, voltas compartilhadas com a melhor destacada e alarme com Desligar para a sala.",
+        "Votação com linha do prazo, rostos de quem votou (nunca em quê) e resultado em barras, pizza ou só a vencedora, à escolha de cada pessoa. Rótulos longos não quebram mais no meio da palavra.",
+        "Dados com teclado de ícones (d4 a d20), partes de cada rolagem entre colchetes, crítico no 20 natural do d20 e, no foco, o dado rolado em destaque com o histórico ao lado.",
+        "Sorteador em roleta: gira e para na opção sorteada para todos, com cores por opção e paletas (Índigo, Pôr do sol, Floresta, Doce e Aleatória em harmonia) compartilhadas pela sala.",
+        "Sua cor fica salva neste navegador e é aplicada ao entrar em qualquer sala.",
+        "Aviso de muitas ações seguidas não aparece mais com uso normal dos widgets (cliques rápidos, edição contínua, rolar logo após sortear); a proteção contra flood continua.",
+        "Widget pessoal ou da sala, escolhido ao criar (Para mim / Para a sala); não existe mais compartilhar nem pedido de aprovação. O cabeçalho mostra quem controla (Todos, Admins ou Só você) e o menu do botão direito segue a mesma ordem em todos os widgets, com Remover deste layout separado de Encerrar para todos.",
+        "Ajustes numa janela com lista lateral: Áudio (com medidor da sensibilidade), Vídeo, Aparência e sons e, para criador e admins, Sala (convite, quem controla cada widget e transferência de posse). No celular, lista com páginas.",
+        "Controles da chamada numa doca fixa no rodapé (nada flutua sobre a sala), com quantas pessoas estão na chamada; no celular, barra de abas Microfone, Áudio, Tela e Mais. Em tela cheia, uma pílula discreta que vira a barra completa ao passar o mouse.",
+        "Pessoas num painel lateral que não tranca a sala: linhas compactas com quem fala, quem está sem microfone e quem transmite (por ícone, não só por cor), abas Pessoas e Permissões para quem gerencia e, no menu de cada pessoa, volume dela para você e Assistir a tela. No celular, segurar a linha abre o mesmo menu.",
+        'Tela nova não ocupa mais um espaço do seu layout sozinha: aparece uma etiqueta no canto ("Fulano começou a transmitir · Assistir") que some sozinha. Um ícone ao vivo discreto mostra quantas telas estão no ar, com Assistir para cada uma, e o sino guarda o histórico com o contador de novas zerando ao abrir.',
+        "Silenciar no menu de cada pessoa: Silenciar para mim (só no seu aparelho, desfaz com Ativar para mim) e, para o dono da sala, Silenciar para todos e Liberar voz. Quem foi silenciado vê o motivo e o microfone fica bloqueado até ser liberado.",
+        "Volume de cada pessoa vai até 200% no menu dela, só no seu aparelho.",
+        "Rodapé com Entrar na chamada, Compartilhar e Flutuante juntos à esquerda. O volume saiu do rodapé: cada tela tem o seu no próprio cabeçalho (clique silencia, passe o mouse para ajustar, até 300% com o ajuste fino), também em tela cheia e na janela flutuante.",
+        "Cor no Cronômetro (cor do anel) e no Personalizado, e Cor e paleta na Votação (cor por opção na pizza e nas barras), pelo menu do botão direito. Trocar a cor não reinicia o tempo nem apaga votos.",
+        "Modo Tira: arrastar um widget ao longo da tira muda a ordem, com o espaço de destino destacado; soltar fora da tira o deixa flutuante. A barra de rolagem da tira tem espaço próprio e nenhum widget fica com a borda cortada.",
+        "O contorno de foco dos campos de texto nos widgets fica inteiro, sem ser cortado pela borda.",
+        "Dados com muitos dados ou rolagens repetidas (10d20, 10#d6) mostram os valores em fichas compactas, com total ou soma, sem nada cortado; no histórico, os valores ficam numa linha própria.",
+        "Em tela cheia, a borda colorida da tela e os espaços vazios somem junto com os controles quando você para de mexer e voltam ao mexer.",
+      ],
+    },
+  ],
+};
+const securityHotfixRelease: Release = {
+  version: "2.8.1",
   date: "2026-10-24",
   title: "Correções de segurança",
   sections: [
     {
       title: "Segurança",
       items: [
-        "Atualização de duas bibliotecas do servidor: uma permitia travar o servidor com envios malformados e outra podia esgotar a memória com envios muito grandes.",
+        "Correções de segurança: atualização de duas bibliotecas do servidor.",
       ],
     },
   ],
 };
-const chatRolesRelease: Release = {
+const stableRelease: Release = {
   version: "2.8.0",
   date: "2026-10-24",
   title: "Chat, papéis na sala e novos widgets",
@@ -445,7 +513,9 @@ const systemRelease: Release = {
 };
 export const releases: Release[] = [
   currentRelease,
-  chatRolesRelease,
+  widgetsPreviewRelease,
+  securityHotfixRelease,
+  stableRelease,
   interfacePreviewRelease,
   sessionWidgetsRelease,
   phaseTwoInitialRelease,

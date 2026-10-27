@@ -20,5 +20,11 @@ conceitos de cada widget, landing page, página de download e identidade visual.
 - Rascunho aprovado vira spec em `docs/design/<peça>.md` + issue `frontend`.
 - Respeitar acessibilidade (contraste AA, movimento reduzido) já no rascunho.
 
-**Skills úteis:** `artifact-design`, `design:design-critique`, `design:ux-copy`,
-`design:accessibility-review`, `anthropic-skills:canvas-design`, `anthropic-skills:brand-guidelines`.
+**Skills (carregue a que se aplica; não todas):**
+
+- Sempre: `vio-design-system`; antes de entregar: `vio-design-review`.
+- Escolher estilo, paleta, fontes: `ui-ux-pro-max`. Direção visual nova: `frontend-design`.
+- Refinar/auditar o existente: `impeccable`. Animação e microinteração: `emil-design-eng`.
+- Crítica e acessibilidade a fundo: `design-critique`, `design-accessibility-review`.
+- Textos: `design-ux-copy`. Spec para o Frontend: `design-handoff`. Padronização: `design-system`.
+- Pesquisa com pessoas: `design-user-research`.

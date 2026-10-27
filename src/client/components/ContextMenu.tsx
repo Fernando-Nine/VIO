@@ -1,4 +1,9 @@
-import { useLayoutEffect, useRef, type KeyboardEvent } from "react";
+import {
+  useLayoutEffect,
+  useRef,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import type { LucideIcon } from "lucide-react";
 
@@ -6,6 +11,8 @@ export interface MenuItem {
   label: string;
   icon?: LucideIcon;
   danger?: boolean;
+  /** Draws a divider above this item. */
+  separated?: boolean;
   run: () => void;
 }
 
@@ -20,9 +27,14 @@ export function ContextMenu({
   label,
   close,
   origin,
+  header,
+  className,
 }: {
   at: { x: number; y: number };
   items: MenuItem[];
+  /** Controls above the items (a volume slider); arrows stay theirs. */
+  header?: ReactNode;
+  className?: string;
   label: string;
   close: () => void;
   /**
@@ -48,7 +60,7 @@ export function ContextMenu({
     const height = win?.innerHeight || box.height;
     el.style.left = `${Math.max(8, Math.min(at.x, width - box.width - 8))}px`;
     el.style.top = `${Math.max(8, Math.min(at.y, height - box.height - 8))}px`;
-    el.querySelector<HTMLButtonElement>("button")?.focus({
+    el.querySelector<HTMLElement>("input, button")?.focus({
       preventScroll: true,
     });
     const outside = (event: PointerEvent) => {
@@ -66,6 +78,14 @@ export function ContextMenu({
     };
   }, [at.x, at.y, doc]);
   function keys(event: KeyboardEvent) {
+    if ((event.target as HTMLElement).matches("input")) {
+      // From the header slider, Tab moves into the items instead of closing.
+      if (event.key === "Tab" && !event.shiftKey) {
+        event.preventDefault();
+        menu.current?.querySelector<HTMLButtonElement>("button")?.focus();
+      }
+      if (event.key !== "Escape") return;
+    }
     const buttons = [
       ...(menu.current?.querySelectorAll<HTMLButtonElement>("button") || []),
     ];
@@ -87,19 +107,24 @@ export function ContextMenu({
   return createPortal(
     <div
       ref={menu}
-      className="context-menu"
+      className={`context-menu${className ? ` ${className}` : ""}`}
       role="menu"
       aria-label={label}
       popover="manual"
       onKeyDown={keys}
       onContextMenu={(e) => e.preventDefault()}
     >
-      {items.map(({ label, icon: Icon, danger, run }) => (
+      {header}
+      {items.map(({ label, icon: Icon, danger, separated, run }) => (
         <button
           key={label}
           role="menuitem"
           tabIndex={-1}
-          className={danger ? "is-danger" : undefined}
+          className={
+            [danger && "is-danger", separated && "is-separated"]
+              .filter(Boolean)
+              .join(" ") || undefined
+          }
           onClick={() => {
             close();
             run();

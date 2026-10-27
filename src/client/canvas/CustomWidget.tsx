@@ -1,15 +1,20 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { Plus, Minus, Share2, Copy, Trash2, X } from "lucide-react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
+import { Plus, Minus, Copy, X, Palette } from "lucide-react";
 import { Dialog } from "../components/Dialog";
+import { ColorFields } from "./ColorFields";
+import { accentChoices } from "../../shared/palettes";
+import { colorInk, defaultColor } from "../../shared/colors";
 import { freshKey } from "../id";
 import { NoteActions } from "./NoteActions";
 import { InlineText } from "./InlineText";
-import {
-  HeaderTools,
-  ScopeBadge,
-  useMenuItems,
-  useRename,
-} from "./header-tools";
+import { useMenuItems, useRename } from "./header-tools";
 import { TimerBlock, timerMenu } from "./TimerBlock";
 import {
   operateWidget,
@@ -21,7 +26,7 @@ import {
   type WidgetContent,
   type WidgetOperation,
 } from "../../shared/widgets";
-import { canEditPublic, canManageRoom } from "../../shared/permissions";
+import { canEditPublic } from "../../shared/permissions";
 import type { MenuItem } from "../components/ContextMenu";
 import type { Controller } from "../room/controller";
 import type { WidgetInstance } from "./model";
@@ -63,7 +68,12 @@ export function widgetValue(
     );
   const raw = widget.state as Partial<SharedWidget> | undefined;
   const parsed = widgetContent.safeParse(
-    raw && { kind: raw.kind, title: raw.title, blocks: raw.blocks },
+    raw && {
+      kind: raw.kind,
+      title: raw.title,
+      blocks: raw.blocks,
+      color: raw.color,
+    },
   );
   if (!parsed.success) return undefined;
   return {
@@ -170,25 +180,26 @@ export function CustomWidget({
 }) {
   const value = widgetValue(widget, engine);
   const [now, setNow] = useState(() => engine.serverNow());
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [sharing, setSharing] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const shareId = useRef("");
+  const [coloring, setColoring] = useState(false);
+  const colorQueue = useRef(Promise.resolve());
+  const saved = useRef(0);
+  const runningTimer = value?.blocks.find(
+    (b) => b.kind === "timer" && b.startedAt !== null,
+  );
+  // A running stopwatch shows tenths, so it ticks faster than a countdown.
+  const tick = !runningTimer
+    ? 0
+    : runningTimer.kind === "timer" &&
+        (runningTimer.mode || (runningTimer.duration ? "down" : "up")) === "up"
+      ? 100
+      : 250;
   useEffect(() => {
-    if (
-      !visible ||
-      !value?.blocks.some((b) => b.kind === "timer" && b.startedAt !== null)
-    )
-      return;
+    if (!visible || !tick) return;
     setNow(engine.serverNow());
-    const timer = setInterval(() => setNow(engine.serverNow()), 250);
+    const timer = setInterval(() => setNow(engine.serverNow()), tick);
     return () => clearInterval(timer);
-  }, [
-    engine,
-    visible,
-    !!value?.blocks.some((b) => b.kind === "timer" && b.startedAt !== null),
-  ]);
+  }, [engine, visible, tick]);
   const shared = !!widget.config.sharedId;
   const owner =
     !!value &&
@@ -217,11 +228,7 @@ export function CustomWidget({
   );
   const timer = value?.blocks.find((b) => b.kind === "timer");
   const addable = value?.kind === "custom" || value?.kind === "notes";
-  const removable =
-    shared &&
-    !!value &&
-    (value.owner === engine.view.id ||
-      canManageRoom(engine.view.snapshot, engine.view.id));
+  const colorable = value?.kind === "custom" || value?.kind === "timer";
   // Mirrors the header tools so narrow headers, which hide them, keep them.
   useMenuItems(
     value
@@ -239,18 +246,11 @@ export function CustomWidget({
                 },
               ]
             : []),
+          ...(owner && colorable
+            ? [{ label: "Cor", icon: Palette, run: () => setColoring(true) }]
+            : []),
           ...(shared
             ? [{ label: "Criar cópia individual", icon: Copy, run: copy }]
-            : [{ label: "Compartilhar", icon: Share2, run: startShare }]),
-          ...(removable
-            ? [
-                {
-                  label: "Excluir para todos",
-                  icon: Trash2,
-                  danger: true,
-                  run: () => setConfirmDelete(true),
-                },
-              ]
             : []),
         ] satisfies MenuItem[])
       : undefined,
@@ -264,11 +264,13 @@ export function CustomWidget({
   async function saveStructure(content: WidgetContent, baseRevision: number) {
     if (!value) return;
     if (shared)
-      await engine.request("widget-structure", {
-        id: value.id,
-        revision: baseRevision,
-        content,
-      });
+      saved.current = (
+        await engine.request<SharedWidget>("widget-structure", {
+          id: value.id,
+          revision: baseRevision,
+          content,
+        })
+      ).revision;
     else {
       const latest = engine.canvas
         .getSnapshot()
@@ -316,9 +318,26 @@ export function CustomWidget({
       }
     }
   }
-  function startShare() {
-    shareId.current ||= widget.id;
-    setSharing(true);
+  /** Picks arrive in bursts (swatches, hue); each one waits for the last. */
+  function saveColor(color: string) {
+    colorQueue.current = colorQueue.current
+      .then(() => {
+        const latest = engine.canvas
+          .getSnapshot()
+          .widgets.find((w) => w.id === widget.id);
+        const current = latest && widgetValue(latest, engine);
+        if (!current || current.color === color) return;
+        return saveStructure(
+          widgetContent.parse({
+            kind: current.kind,
+            title: current.title,
+            blocks: current.blocks,
+            color,
+          }),
+          shared ? Math.max(current.revision, saved.current) : current.revision,
+        );
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }
   function copy() {
     if (!value) return;
@@ -403,32 +422,17 @@ export function CustomWidget({
     void operate(operation).catch((e) => setError(e.message));
   };
   return (
-    <div className={`custom-widget kind-${value.kind || "custom"}`}>
-      <HeaderTools>
-        <ScopeBadge shared={shared} />
-        {!shared && (
-          <button
-            className="icon-button"
-            aria-label={
-              widget.type === "notes"
-                ? "Compartilhar notas para editar juntos"
-                : "Compartilhar widget com a sala"
-            }
-            onClick={startShare}
-          >
-            <Share2 size={16} />
-          </button>
-        )}
-        {shared && (
-          <button
-            className="icon-button"
-            aria-label="Criar cópia individual"
-            onClick={copy}
-          >
-            <Copy size={16} />
-          </button>
-        )}
-      </HeaderTools>
+    <div
+      className={`custom-widget kind-${value.kind || "custom"} ${value.color ? "has-accent" : ""}`}
+      style={
+        value.color
+          ? ({
+              "--accent": value.color,
+              "--accent-ink": colorInk(value.color),
+            } as CSSProperties)
+          : undefined
+      }
+    >
       <div className="custom-blocks">
         {widget.config.noteSender && (
           <p className="note-origin">
@@ -548,92 +552,14 @@ export function CustomWidget({
             mudar a estrutura.
           </p>
         )}
-      {confirmDelete && (
-        <Dialog
-          title="Excluir este widget para todos?"
-          close={() => setConfirmDelete(false)}
-        >
-          <p>
-            O conteúdo será removido desta sala. As cópias individuais continuam
-            existindo.
-          </p>
-          <button
-            className="danger"
-            disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              void engine
-                .request("widget-delete", { id: value.id })
-                .then(() => engine.canvas.remove(widget.id))
-                .catch((e) => setError(e.message))
-                .finally(() => {
-                  setBusy(false);
-                  setConfirmDelete(false);
-                });
-            }}
-          >
-            Excluir para todos
-          </button>
-        </Dialog>
-      )}
-      {sharing && (
-        <Dialog
-          title={
-            widget.type === "notes"
-              ? "Compartilhar notas para editar juntos?"
-              : "Compartilhar este widget?"
-          }
-          close={() => setSharing(false)}
-        >
-          <p>
-            O conteúdo ficará disponível na sala. Convidados precisam de
-            aprovação para compartilhar. A edição pública exige permissão.
-          </p>
-          <p className="field-note">
-            A sala guarda esses dados temporariamente. Eles desaparecem quando a
-            sala termina ou o servidor reinicia. Cada pessoa escolhe se adiciona
-            o widget ao próprio layout.
-          </p>
-          {error && <p role="alert">{error}</p>}
-          <button
-            className="primary"
-            disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              setError("");
-              void engine
-                .request<SharedWidget | { id: string; pending: true }>(
-                  "widget-create",
-                  {
-                    id: shareId.current,
-                    content: {
-                      kind: value.kind,
-                      title: value.title,
-                      blocks: value.blocks,
-                    },
-                  },
-                )
-                .then((result) => {
-                  if ("pending" in result) {
-                    engine.canvas.updateWidget(widget.id, {
-                      config: { ...widget.config, pendingShareId: result.id },
-                    });
-                    setSharing(false);
-                    setError(
-                      "Pedido enviado ao criador e aos administradores.",
-                    );
-                    return;
-                  }
-                  engine.receiveSharedWidget(result);
-                  engine.canvas.bindShared(widget.id, result.id);
-                  setSharing(false);
-                })
-                .catch((e) => setError(e.message))
-                .finally(() => setBusy(false));
-            }}
-          >
-            Compartilhar com a sala
-          </button>
+      {coloring && (
+        <Dialog title="Cor" centered close={() => setColoring(false)}>
+          <ColorFields
+            color={value.color || defaultColor}
+            choices={accentChoices}
+            pick={saveColor}
+            done={() => setColoring(false)}
+          />
         </Dialog>
       )}
     </div>

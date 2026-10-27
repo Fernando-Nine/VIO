@@ -104,11 +104,10 @@ export function ColorPicker({ engine }: { engine: Controller }) {
   return (
     <fieldset className="color-picker">
       <legend>
-        <Palette size={17} /> Sua cor nesta sala
+        <Palette size={17} /> Minha cor
       </legend>
       <p className="field-note">
-        Escolha como você aparece para as outras pessoas. A cor permanece nas
-        reconexões e volta ao anil ao sair da sala.
+        Fica salva neste navegador e vale nas próximas salas.
       </p>
       <div
         className="color-identity-preview"

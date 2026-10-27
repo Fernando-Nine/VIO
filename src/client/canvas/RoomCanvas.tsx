@@ -34,10 +34,17 @@ import {
   MonitorUp,
   Plus,
   SlidersHorizontal,
+  User,
+  Users,
   X,
 } from "lucide-react";
 import { Notifications } from "../components/Notifications";
-import { canManageRoom } from "../../shared/permissions";
+import {
+  LiveScreens,
+  ScreenToast,
+  type ScreenEvent,
+} from "../components/LiveScreens";
+import { canManageRoom, roleAllows, roomRole } from "../../shared/permissions";
 import type { SharedWidget } from "../../shared/widgets";
 import { contentKind } from "../../shared/widgets";
 import { Dialog } from "../components/Dialog";
@@ -63,7 +70,8 @@ import { WidgetFrame } from "./WidgetFrame";
 import { adjacentDropSlot, dropSlotAt, type Point } from "./drag";
 import { createWidget, titleOf, widgetRegistry } from "./widgets";
 import { createModule } from "./ModuleWidget";
-import { isModule, type ModuleKind } from "../../shared/room-modules";
+import { createContent } from "./CustomWidget";
+import { isModule } from "../../shared/room-modules";
 
 // dnd-kit starts a mouse drag on the handle at pointerdown, so a plain click
 // (or double click to rename) would already detach the widget. Require a
@@ -98,7 +106,7 @@ const plugins = (
   Feedback.configure({ feedback: "none", dropAnimation: null }),
   Accessibility.configure({
     screenReaderInstructions: {
-      draggable: `Use espaço, setas e espaço para encaixar. Escape cancela. No mouse, arraste livremente ou segure ${canvasShortcuts.snap.label} para encaixar.`,
+      draggable: `Use espaço, setas e espaço para encaixar. Escape cancela. No mouse, arraste livremente ou segure ${canvasShortcuts.snap.label} para encaixar; na tira, arrastar ao longo dela muda a ordem.`,
     },
     announcements: {
       dragstart: () =>
@@ -143,6 +151,7 @@ function CanvasSlot({
   restore,
   dragging,
   split,
+  reorderTarget,
 }: {
   slot: Slot;
   index: number;
@@ -157,6 +166,8 @@ function CanvasSlot({
   restore: () => void;
   dragging: boolean;
   split: () => void;
+  /** A strip widget dragged along the strip lands here. */
+  reorderTarget: boolean;
 }) {
   const { ref, isDropTarget } = useDroppable({
     id: slot.id,
@@ -172,7 +183,7 @@ function CanvasSlot({
   return (
     <div
       ref={nodeRef}
-      className={`canvas-slot ${isDropTarget && !disabled ? "is-drop-target" : ""}`}
+      className={`canvas-slot ${isDropTarget && !disabled ? "is-drop-target" : ""} ${reorderTarget ? "is-reorder-target" : ""}`}
       data-slot-id={slot.id}
       data-span={slotUnits(slot)}
       style={{ "--slot-span": slotUnits(slot) } as CSSProperties}
@@ -258,7 +269,7 @@ export function RoomCanvas(props: Props) {
   const [catalog, setCatalog] = useState<string | null>(null);
   const [catalogTab, setCatalogTab] = useState("native");
   const [communityNotice, setCommunityNotice] = useState(false);
-  const [moduleChoice, setModuleChoice] = useState<ModuleKind | null>(null);
+  const [scopeChoice, setScopeChoice] = useState<string | null>(null);
   const [layoutOpen, setLayoutOpen] = useState(false);
   const [drag, setDrag] = useState<{ id: string; x: number; y: number } | null>(
     null,
@@ -271,10 +282,14 @@ export function RoomCanvas(props: Props) {
   const [announcement, announce] = useState("");
   const [roving, setRoving] = useState<string | null>(null);
   const [snap, setSnap] = useState(false);
+  const [stripTarget, setStripTarget] = useState<string | null>(null);
   const shift = useRef(false);
   const keyboardDrag = useRef(false);
   const [nearTop, setNearTop] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [screenEvents, setScreenEvents] = useState<ScreenEvent[]>([]);
+  const [toast, setToast] = useState<string | null>(null);
+  const hideToast = useCallback(() => setToast(null), []);
   const [fullscreenIntro, setFullscreenIntro] = useState(false);
   const [highlightedSlot, setHighlightedSlot] = useState<string | null>(null);
   const pendingFocus = useRef<string | null>(null);
@@ -314,7 +329,10 @@ export function RoomCanvas(props: Props) {
   const stripMode = isStrip(state);
   const stripBox = geometry.strip;
   // Lift the call dock above a bottom strip so it never covers it.
+  // Only the full-screen pill floats over the canvas; elsewhere the dock is
+  // a footer below it (docs/design/chamada.md).
   const dockLift =
+    props.isFullscreen &&
     stripMode &&
     !state.single &&
     stripBox &&
@@ -327,14 +345,15 @@ export function RoomCanvas(props: Props) {
       ?.closest<HTMLElement>(".player")
       ?.style.setProperty("--dock-lift", `${dockLift}px`);
   }, [dockLift, root]);
-  // The dock floats at the bottom centre; widgets ending right there reserve
-  // its height so their last controls (chat input, poll actions) stay usable.
+  // In full screen the dock floats at the bottom centre; widgets ending right
+  // there reserve its height so their last controls stay usable.
   const underDock = (box: {
     x: number;
     y: number;
     width: number;
     height: number;
   }) =>
+    !!props.isFullscreen &&
     Math.abs(box.y + box.height - (geometry.bounds.height - dockLift)) < 14 &&
     box.x < geometry.bounds.width / 2 + 230 &&
     box.x + box.width > geometry.bounds.width / 2 - 230;
@@ -381,9 +400,10 @@ export function RoomCanvas(props: Props) {
         })),
     ) || [];
   const publicationsKey = publications.map((p) => p.id).join("|");
-  const liveUnwatched = publications.filter(
-    (p) => !p.own && !engine.view.watching.includes(p.id),
-  );
+  const liveScreens = publications
+    .filter((p) => !p.own)
+    .map((p) => ({ ...p, watching: engine.view.watching.includes(p.id) }));
+  const toastEvent = screenEvents.find((e) => e.id === toast);
   const epoch = useRef(snapshot?.epoch);
 
   function focusHeader(id: string) {
@@ -430,6 +450,9 @@ export function RoomCanvas(props: Props) {
     );
   }
   useEffect(() => {
+    // A fresh room (or epoch) only primes what is already live: those
+    // screens are in the live icon, not news to announce.
+    const primed = epoch.current === snapshot?.epoch && seen.current.size > 0;
     if (epoch.current !== snapshot?.epoch) {
       seen.current.clear();
       epoch.current = snapshot?.epoch;
@@ -448,11 +471,25 @@ export function RoomCanvas(props: Props) {
         store.add(screenWidget(id));
       }
     }
+    // Seed with a marker so an empty room still counts as primed later.
+    if (!seen.current.size) seen.current.add("");
     for (const publication of publications) {
       if (seen.current.has(publication.id)) continue;
       seen.current.add(publication.id);
-      if (!publication.own && !engine.view.watching.includes(publication.id)) {
-        store.offer(publication);
+      if (
+        primed &&
+        !publication.own &&
+        !engine.view.watching.includes(publication.id)
+      ) {
+        const event = {
+          id: freshKey(),
+          publicationId: publication.id,
+          name: publication.title,
+          at: Date.now(),
+          read: false,
+        };
+        setScreenEvents((events) => [...events, event].slice(-30));
+        setToast(event.id);
       }
     }
     const live = new Set(publications.map((p) => p.id));
@@ -462,13 +499,6 @@ export function RoomCanvas(props: Props) {
       ...latest.slots.flatMap((s) => (s.offer ? [s.offer] : [])),
     ])
       if (!live.has(item.id)) store.decline(item.id);
-    for (const widget of latest.widgets) {
-      const approved = snapshot?.widgets?.find(
-        (w) =>
-          w.id === widget.config.pendingShareId && w.owner === engine.view.id,
-      );
-      if (approved) store.bindShared(widget.id, approved.id);
-    }
     for (const widget of latest.widgets)
       if (
         widget.config.sharedId &&
@@ -545,18 +575,31 @@ export function RoomCanvas(props: Props) {
     focusHeader(id);
     setCatalog(null);
   }
+  // "Para a sala" only for whoever the room lets create (#104).
+  const createsForRoom =
+    !!snapshot &&
+    roleAllows(
+      snapshot.permissions,
+      roomRole(snapshot, engine.view.id),
+      roomRole(snapshot, engine.view.id) === "admin"
+        ? "adminCreate"
+        : "guestCreate",
+    );
   async function addWidget(type: string, scope?: "room" | "individual") {
-    if (isModule(type) && !scope) {
-      setModuleChoice(type);
+    const scoped = isModule(type) || type === "timer";
+    if (scoped && !scope && createsForRoom) {
+      setScopeChoice(type);
       return;
     }
-    if (type === "chat" || (isModule(type) && scope === "room")) {
+    if (type === "chat" || (scoped && scope === "room")) {
       try {
         const widget = await engine.request<SharedWidget>("widget-create", {
           id: freshKey(),
           content: isModule(type)
             ? createModule(type)
-            : { kind: "chat", title: "Chat", blocks: [] },
+            : type === "timer"
+              ? createContent("timer")
+              : { kind: "chat", title: "Chat", blocks: [] },
         });
         engine.receiveSharedWidget(widget);
         openShared(widget);
@@ -606,20 +649,16 @@ export function RoomCanvas(props: Props) {
     }
     setCatalog(null);
   }
-  async function remove(widget: WidgetInstance) {
+  async function remove(widget: WidgetInstance, forEveryone = false) {
     const slotId = store
       .getSnapshot()
       .slots.find((s) => s.widgetId === widget.id)?.id;
     let endedForEveryone = false;
-    if (widget.config.sharedId) {
+    if (forEveryone && widget.config.sharedId) {
       const shared = engine.view.snapshot?.widgets?.find(
         (w) => w.id === widget.config.sharedId,
       );
-      if (
-        shared &&
-        (shared.owner === engine.view.id ||
-          canManageRoom(snapshot, engine.view.id))
-      ) {
+      if (shared) {
         try {
           await engine.request("widget-delete", { id: shared.id });
           endedForEveryone = true;
@@ -731,6 +770,7 @@ export function RoomCanvas(props: Props) {
     restore: () => {},
     dragging: !!drag && !keyboardDrag.current,
     split: () => store.splitSlot(slot.id),
+    reorderTarget: stripTarget === slot.id,
   });
   useLayoutEffect(() => {
     if (!highlightedSlot) return;
@@ -749,6 +789,21 @@ export function RoomCanvas(props: Props) {
     const box = geometry.slots.get(slot.id);
     return box?.visible && !slot.offer ? [{ ...box, id: slot.id }] : [];
   });
+  /**
+   * Inside the strip, a strip widget reorders (null: drops back in place);
+   * outside it, the drag floats the widget as before. Undefined: not a reorder.
+   */
+  function stripDrop(id: string, point: Point) {
+    const area = geometry.strip;
+    const base = root.current?.getBoundingClientRect();
+    if (!stripMode || state.single || !area || !base) return undefined;
+    if (state.slots.findIndex((s) => s.widgetId === id) <= 0) return undefined;
+    const local = { x: point.x - base.left, y: point.y - base.top };
+    const target = dropSlotAt(local, dropSlots, area);
+    if (!target) return undefined;
+    const index = state.slots.findIndex((s) => s.id === target.id);
+    return index > 0 && state.slots[index].widgetId !== id ? target.id : null;
+  }
 
   return (
     <div
@@ -838,30 +893,10 @@ export function RoomCanvas(props: Props) {
           engine={engine}
           openWidget={(w) => openShared(w, true)}
           openScreen={showPublication}
+          screenEvents={screenEvents.filter((e) => e.id !== toast)}
           onOpenChange={setNotificationsOpen}
         />
-        {liveUnwatched.length > 0 && (
-          <button
-            className="live-chip"
-            onClick={() => {
-              if (liveUnwatched.length === 1)
-                showPublication(liveUnwatched[0].id);
-              else {
-                setCatalog(
-                  state.slots.find((s) => !s.widgetId && !s.offer)?.id ?? "new",
-                );
-                setCatalogTab("live");
-              }
-            }}
-          >
-            <i className="live-pulse" aria-hidden="true" />
-            <span>
-              {liveUnwatched.length === 1
-                ? `${liveUnwatched[0].title} ao vivo`
-                : `${liveUnwatched.length} transmissões ao vivo`}
-            </span>
-          </button>
-        )}
+        <LiveScreens screens={liveScreens} watch={showPublication} />
         <button
           className="icon-button canvas-fullscreen"
           onClick={props.fullscreen}
@@ -924,6 +959,12 @@ export function RoomCanvas(props: Props) {
             manager.actions.move({ to: point, propagate: false });
           }
           origin.point = point;
+          setStripTarget(
+            keyboardDrag.current || shift.current
+              ? null
+              : stripDrop(String(event.operation.source?.id || ""), point) ||
+                  null,
+          );
           const x = point.x - origin.initial.x,
             y = point.y - origin.initial.y;
           manager.dragOperation.shape = new Rectangle(
@@ -951,7 +992,16 @@ export function RoomCanvas(props: Props) {
               dropSlots,
               geometry.bounds,
             );
-            if (
+            const along =
+              shift.current || keyboardDrag.current
+                ? undefined
+                : stripDrop(id, point);
+            if (along !== undefined) {
+              if (along) {
+                store.reorder(id, along);
+                announce("Widget movido na tira.");
+              }
+            } else if (
               target &&
               (shift.current || keyboardDrag.current) &&
               !state.single
@@ -985,6 +1035,7 @@ export function RoomCanvas(props: Props) {
             }
           }
           dragOrigin.current = null;
+          setStripTarget(null);
           keyboardDrag.current = false;
           shift.current = false;
           setSnap(false);
@@ -1200,6 +1251,7 @@ export function RoomCanvas(props: Props) {
                 navigate={navigate}
                 focus={() => focus(widget.id)}
                 close={() => void remove(widget)}
+                end={() => void remove(widget, true)}
               />
             );
           })}
@@ -1225,6 +1277,21 @@ export function RoomCanvas(props: Props) {
       <span className="sr-only" role="status" aria-live="polite">
         {announcement}
       </span>
+      {toastEvent && (
+        <ScreenToast
+          event={toastEvent}
+          done={hideToast}
+          watch={() => {
+            setScreenEvents((events) =>
+              events.map((e) =>
+                e.id === toastEvent.id ? { ...e, read: true } : e,
+              ),
+            );
+            setToast(null);
+            showPublication(toastEvent.publicationId);
+          }}
+        />
+      )}
       {offer && (
         <Dialog
           title="Todos os espaços estão ocupados"
@@ -1433,9 +1500,8 @@ export function RoomCanvas(props: Props) {
           {catalogTab === "room" && (
             <>
               {!snapshot?.widgets?.length ? (
-                <p>
-                  Ninguém compartilhou um widget ainda. Crie um widget
-                  individual e use Compartilhar.
+                <p className="widget-empty">
+                  Nenhum widget da sala ainda. Crie um na aba VIO.
                 </p>
               ) : (
                 <div className="widget-catalog">
@@ -1455,11 +1521,6 @@ export function RoomCanvas(props: Props) {
                   ))}
                 </div>
               )}
-              <p className="field-note">
-                Cada pessoa escolhe o que entra no próprio layout. O criador e
-                administradores gerenciam widgets públicos; convidados editam
-                com permissão.
-              </p>
             </>
           )}
           {catalogTab === "community" && (
@@ -1475,46 +1536,34 @@ export function RoomCanvas(props: Props) {
           )}
         </Dialog>
       )}
-      {catalog && moduleChoice && (
+      {catalog && scopeChoice && (
         <Dialog
-          title={widgetRegistry[moduleChoice].title}
+          title={widgetRegistry[scopeChoice].title}
           centered
-          close={() => setModuleChoice(null)}
+          close={() => setScopeChoice(null)}
         >
-          <p>Escolha onde usar este widget.</p>
           <div className="module-scope">
             <button
               className="primary"
-              disabled={!canManageRoom(snapshot, engine.view.id)}
               onClick={() => {
-                const type = moduleChoice;
-                setModuleChoice(null);
+                const type = scopeChoice;
+                setScopeChoice(null);
                 void addWidget(type, "room");
               }}
             >
-              Adicionar à sala
+              <Users size={16} aria-hidden="true" /> Para a sala
             </button>
             <button
               className="secondary"
               onClick={() => {
-                const type = moduleChoice;
-                setModuleChoice(null);
+                const type = scopeChoice;
+                setScopeChoice(null);
                 void addWidget(type, "individual");
               }}
             >
-              Só para mim
+              <User size={16} aria-hidden="true" /> Para mim
             </button>
           </div>
-          {!canManageRoom(snapshot, engine.view.id) && (
-            <p className="field-note">
-              Só o criador e administradores adicionam diretamente à sala. Você
-              pode criar um individual e pedir para compartilhar.
-            </p>
-          )}
-          <p className="field-note">
-            Na sala, cada pessoa recebe um convite para adicionar ao próprio
-            layout.
-          </p>
         </Dialog>
       )}
       {catalog && communityNotice && (

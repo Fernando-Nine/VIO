@@ -1,43 +1,38 @@
 # Frontend — handoff
 
-Atualizado: 2026-10-23
+Atualizado: 2026-10-26
 
 ## Agora
 
-Bloco #52–#55 entregue (PRs #59, #60, #61, #53 na PR seguinte). Nada em andamento.
+Fila 2.9.0 concluída. Última PR: #156 (#145, rc.19), squash quando a CI ficar verde.
 
 ## Feito recentemente
 
-- #52: `.widget-body` é contêiner de tamanho (`container: widget-body / size`); widgets
-  usam `cqw/cqh` e `em` a partir de um `font-size` por widget. Cronômetro curto põe o
-  relógio ao lado dos controles. Cabeçalho ≤300 px: uma linha, ferramentas no botão ⋯
-  (`.widget-more`), que abre o mesmo menu do botão direito.
-- #54: `canvas/InlineText.tsx` (clique edita, blur/Enter salva, Esc cancela). Placar e
-  Notas sem janela; Sorteador/Tarefas editam dentro do widget (`ModuleFields`), cada campo
-  salva ao sair (fila em `saveConfig`, revisão vinda da resposta do servidor). Sem setinhas
-  em `input[type=number]`.
-- #55: `useEndAlarm` em `TimerBlock.tsx`: toca a cada 1,2 s até "Desligar alarme" ou 1 min.
-- #53: Votação configurada na própria face antes de abrir; votos ocultos até o fim
-  (contrato do Backend em #53: `votes` só o próprio, `voters` total).
+- #115 (PR #138, rc.14): `color` no Cronômetro/Personalizado, cor por opção + `palette` na
+  Votação. Seletor comum `canvas/ColorFields.tsx`; helpers em `shared/palettes.ts`.
+- #81 + #143 (PR #139, rc.15): tira reordena arrastando (`stripDrop` no `RoomCanvas`);
+  recorte ignora cortes < 2 px (snap fracionário); `scrollbar-gutter` + respiro na tira.
+- #142 (PR #151, rc.16): anel de foco interno nos campos dos widgets.
+- #141 (PR #152, rc.17): Dados em fichas para N# e mais de 3 dados; histórico truncado.
+- #144 (PR #154, rc.18): borda da tela some em tela cheia inativa.
+- #145 (PR #156, rc.19): rodapé Entrar na chamada → Compartilhar → Flutuante à esquerda;
+  volume por tela no cabeçalho (`components/ScreenVolume.tsx`, substitui `VolumeControl`).
 
 ## Decisões
 
-- Ação secundária vai para o menu do cabeçalho/⋯, nunca para o corpo.
-- Toda ferramenta do cabeçalho também existe no menu (o ⋯ esconde as ferramentas).
-- Esperar a CI verde antes do squash merge; `npm run build` local pega erro de CSS
-  (lightningcss) que o typecheck não pega.
+- Cada PR sobe um `-rc.N` e regenera o `CHANGELOG.md` com `npm run build` (a CI confere).
+- Várias PRs abertas: merge sequencial; a cada squash, juntar a `main` na próxima e subir
+  a rc (conflitos só em releases/package/CHANGELOG e CSS anexado no fim).
+- `workspace.css` segue sem prettier; blocos novos vão no fim.
+- Sem force push (trava). Matar o servidor local pela porta.
+- Screenshots com duas pessoas: segundo contexto do Playwright entra pelo código da sala e
+  compartilha com `--auto-select-desktop-capture-source`.
 
 ## Pendente / bloqueios
 
-- Tira do celular (~190×150): Votação aberta com rótulos longos quebra a palavra e pode
-  rolar um pouco; avaliar com o usuário.
-
-## Como testar a tela
-
-Script de screenshots: semeia `vio:canvas:v2` no localStorage (preset `strip-left`,
-foco + 3 na tira) e entra numa sala nova com Playwright global
-(`/opt/node-tools/node_modules/playwright`). Viewports 1366×768 e 390×844.
+- Widget Personalizado não está no catálogo; o menu "Cor" aparece se ele existir.
+- Em tela cheia inativa, as bordas tracejadas dos espaços vazios continuam visíveis.
 
 ## Próximo passo
 
-Pedir ao usuário o retorno da prévia e abrir issues do que ele apontar.
+Pedir ao copiloto a próxima fila.

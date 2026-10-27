@@ -1,18 +1,36 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import {
   Settings2,
-  Share2,
   HelpCircle,
   ArrowUp,
   ArrowDown,
   X,
   Plus,
-  Trophy,
-  Check,
   RotateCcw,
+  Palette,
+  History,
+  Square,
 } from "lucide-react";
 import { Dialog } from "../components/Dialog";
 import { InlineText } from "./InlineText";
+import { DiceFace } from "./DiceFace";
+import { PollFace, chartMenu, useChart } from "./PollFace";
+import { RaffleFace, useWheel, wheelMenu } from "./RaffleFace";
+import { ColorFields, PaletteChoice } from "./ColorFields";
+import {
+  colorAt,
+  optionColors,
+  paletteColors,
+  pollColored,
+  swatches,
+  withPalette,
+} from "../../shared/palettes";
 import { clock, parseClock } from "./TimerBlock";
 import { freshKey } from "../id";
 import { canEditPublic } from "../../shared/permissions";
@@ -26,6 +44,7 @@ import {
   defaultModule,
   moduleConfig,
   moduleElapsed,
+  moduleResets,
   moduleTitles,
   type ModuleAction,
   type ModuleConfig,
@@ -33,14 +52,60 @@ import {
   type ModuleResult,
 } from "../../shared/room-modules";
 import type { WidgetProps } from "./widgets";
-import {
-  HeaderTools,
-  ScopeBadge,
-  useMenuItems,
-  useRename,
-} from "./header-tools";
+import { HeaderTools, useMenuItems, useRename } from "./header-tools";
 import type { WidgetInstance } from "./model";
 import type { Controller } from "../room/controller";
+
+type Poll = Extract<ModuleConfig, { kind: "poll" }>;
+/** Each poll option's chip; choosing one opens the picker under the list. */
+function OptionColors({
+  config,
+  save,
+}: {
+  config: Poll;
+  save: (id: string, color: string) => void;
+}) {
+  const [open, setOpen] = useState<string | null>(null);
+  const colors = optionColors(config);
+  const choices = swatches(
+    paletteColors(
+      config.palette,
+      config.options.map((o) => o.color),
+    ),
+  );
+  const index = config.options.findIndex((o) => o.id === open);
+  return (
+    <div className="option-colors">
+      <ul>
+        {config.options.map((option, i) => (
+          <li key={option.id}>
+            <button
+              type="button"
+              aria-label={`Cor de ${option.label}`}
+              aria-expanded={open === option.id}
+              onClick={() => setOpen(open === option.id ? null : option.id)}
+            >
+              <span
+                className="raffle-chip"
+                style={{ "--chip": colors[i] } as CSSProperties}
+              />
+              {option.label}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {index >= 0 && (
+        <ColorFields
+          key={open}
+          color={colors[index]}
+          choices={choices}
+          pick={(color) => save(open!, color)}
+          done={() => setOpen(null)}
+        />
+      )}
+    </div>
+  );
+}
 
 export function createModule(kind: ModuleKind): WidgetContent {
   return {
@@ -133,11 +198,9 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
   const [editing, setEditing] = useState(false),
     [help, setHelp] = useState(false),
     [history, setHistory] = useState(false),
-    [allTasks, setAllTasks] = useState(false);
-  // Empty on purpose: the configured command shows as the suggestion.
-  const [expression, setExpression] = useState("");
+    [allTasks, setAllTasks] = useState(false),
+    [palettes, setPalettes] = useState(false);
   const [error, setError] = useState(""),
-    [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false),
     [now, setNow] = useState(() => engine.serverNow());
   const retry = useRef({ serialized: "", id: "" });
@@ -156,6 +219,11 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
       ? pollStart + config.duration * 1000
       : null;
   const pollClosed = config?.kind === "poll" && !!state.closed;
+  // Re-render the header menu when a personal view choice changes.
+  useChart();
+  useWheel();
+  const pollRunning =
+    pollStart != null && !pollClosed && (pollEnd == null || now < pollEnd);
   const [revealAt, setRevealAt] = useState(0);
   const seen = useRef({ start: pollStart, closed: pollClosed });
   useEffect(() => {
@@ -190,15 +258,6 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
   useMenuItems(
     value && config
       ? [
-          ...(widget.config.sharedId
-            ? []
-            : [
-                {
-                  label: "Compartilhar",
-                  icon: Share2,
-                  run: () => void share(),
-                },
-              ]),
           ...(config.kind === "dice"
             ? [
                 {
@@ -206,6 +265,29 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
                   icon: HelpCircle,
                   run: () => setHelp(true),
                 },
+                ...(state.history?.length
+                  ? [
+                      {
+                        label: "Histórico completo",
+                        icon: History,
+                        run: () => setHistory(true),
+                      },
+                    ]
+                  : []),
+              ]
+            : []),
+          ...(config.kind === "random"
+            ? [
+                wheelMenu(),
+                ...(state.history?.length
+                  ? [
+                      {
+                        label: "Histórico completo",
+                        icon: History,
+                        run: () => setHistory(true),
+                      },
+                    ]
+                  : []),
               ]
             : []),
           ...(editable && config.kind !== "dice" && config.kind !== "poll"
@@ -217,6 +299,34 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
                 },
               ]
             : []),
+          ...(config.kind === "poll" && state.startedAt != null && !pollRunning
+            ? chartMenu()
+            : []),
+          ...(controllable && config.kind === "poll" && state.startedAt != null
+            ? [
+                pollRunning
+                  ? {
+                      label: "Encerrar votação",
+                      icon: Square,
+                      run: () =>
+                        void act({
+                          kind: "poll-control",
+                          action: "close",
+                          revision: value.revision,
+                        }),
+                    }
+                  : {
+                      label: "Nova votação",
+                      icon: RotateCcw,
+                      run: () =>
+                        void act({
+                          kind: "poll-control",
+                          action: "reset",
+                          revision: value.revision,
+                        }),
+                    },
+              ]
+            : []),
           ...(controllable && config.kind !== "poll"
             ? [
                 {
@@ -225,6 +335,16 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
                   danger: true,
                   run: () =>
                     void act({ kind: "reset", revision: value.revision }),
+                },
+              ]
+            : []),
+          // Appearance comes after the widget's own actions.
+          ...(editable && (config.kind === "random" || config.kind === "poll")
+            ? [
+                {
+                  label: "Cor e paleta",
+                  icon: Palette,
+                  run: () => setPalettes(true),
                 },
               ]
             : []),
@@ -270,9 +390,9 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
         ...content,
         revision: latest.revision + 1,
         moduleState:
-          JSON.stringify(content.module) === JSON.stringify(latest.module)
-            ? latest.moduleState
-            : {},
+          content.module && moduleResets(latest.module, content.module)
+            ? {}
+            : latest.moduleState,
       },
     });
   }
@@ -308,7 +428,6 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
     if (busy || !value?.module) return;
     setBusy(true);
     setError("");
-    setNotice("");
     const serialized = JSON.stringify(operation);
     if (retry.current.serialized !== serialized)
       retry.current = { serialized, id: freshKey() };
@@ -347,56 +466,8 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
       setBusy(false);
     }
   }
-  async function share() {
-    if (!value || busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      const id = widget.config.pendingShareId || freshKey();
-      engine.canvas.updateWidget(widget.id, {
-        config: { ...widget.config, pendingShareId: id },
-      });
-      const result = await engine.request<SharedWidget | { pending: true }>(
-        "widget-create",
-        {
-          id,
-          content: {
-            kind: value.kind,
-            title: value.title,
-            blocks: [],
-            module: value.module,
-          },
-        },
-      );
-      if ("pending" in result)
-        setNotice(
-          "Pedido enviado aos responsáveis. Seu widget continua individual até a aprovação.",
-        );
-      else {
-        engine.receiveSharedWidget(result);
-        engine.canvas.bindShared(widget.id, result.id);
-      }
-    } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Não foi possível compartilhar.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
   const controls = (
     <HeaderTools>
-      <ScopeBadge shared={!!widget.config.sharedId} />
-      {!widget.config.sharedId && (
-        <button
-          className="icon-button"
-          aria-label="Compartilhar widget"
-          disabled={busy}
-          onClick={() => void share()}
-        >
-          <Share2 size={14} />
-        </button>
-      )}
       {config.kind === "dice" && (
         <button
           className="icon-button"
@@ -453,24 +524,7 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
     state.startedAt != null &&
     !state.closed &&
     (!config.duration || now < state.startedAt + config.duration * 1000);
-  const pollCounts =
-    config.kind === "poll"
-      ? config.options.map(
-          (option) =>
-            Object.values(state.votes || {}).filter((v) => v === option.id)
-              .length,
-        )
-      : [];
-  const topVotes = Math.max(0, ...pollCounts);
-  // The server sends per-option votes only once the poll ends.
-  const revealed =
-    config.kind === "poll" && state.startedAt != null && !pollOpen;
   const pollSetup = config.kind === "poll" && state.startedAt == null;
-  const voters = state.voters ?? Object.keys(state.votes || {}).length;
-  const winners =
-    revealed && config.kind === "poll" && topVotes
-      ? config.options.filter((_, i) => pollCounts[i] === topVotes)
-      : [];
   return (
     <div
       className={`module-widget kind-${config.kind} ${compact ? "is-compact" : ""}`}
@@ -502,129 +556,39 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
       ) : (
         <div className="module-content">
           {config.kind === "poll" && (
-            <>
-              <strong className="module-question">{config.question}</strong>
-              <small>
-                {state.startedAt == null
-                  ? "Aguardando abertura"
-                  : pollOpen
-                    ? `${config.duration ? `Restam ${time(config.duration - (now - state.startedAt) / 1000)}` : "Votação aberta"} · ${voters} ${voters === 1 ? "pessoa votou" : "pessoas votaram"}`
-                    : `${
-                        winners.length === 1
-                          ? `Vencedor: ${winners[0].label}`
-                          : winners.length
-                            ? "Empate"
-                            : "Votação encerrada"
-                      } · ${voters} ${voters === 1 ? "voto" : "votos"}`}
-              </small>
-              <div
-                className={`module-options ${revealAt ? "is-revealing" : ""}`}
-              >
-                {config.options.map((option, i) => {
-                  const mine = state.votes?.[engine.view.id] === option.id;
-                  return (
-                    <button
-                      key={option.id}
-                      className={`secondary ${winners.includes(option) ? "is-winner" : ""}`}
-                      aria-pressed={mine}
-                      disabled={!pollOpen || busy}
-                      onClick={() =>
-                        void act({ kind: "vote", optionId: option.id })
-                      }
-                    >
-                      <span>{option.label}</span>
-                      {revealed ? (
-                        <b>
-                          {winners.includes(option) && (
-                            <Trophy size={13} aria-label="Vencedor" />
-                          )}
-                          {pollCounts[i]}
-                        </b>
-                      ) : (
-                        mine && <Check size={14} aria-label="Seu voto" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-              {controllable && (state.startedAt != null || !editable) && (
-                <button
-                  className="text-button"
-                  disabled={busy}
-                  onClick={() =>
-                    void act({
-                      kind: "poll-control",
-                      action:
-                        state.startedAt == null
-                          ? "start"
-                          : pollOpen
-                            ? "close"
-                            : "reset",
-                      revision: value.revision,
-                    })
-                  }
-                >
-                  {state.startedAt == null
-                    ? "Abrir votação"
-                    : pollOpen
-                      ? "Encerrar votação"
-                      : "Nova votação"}
-                </button>
-              )}
-            </>
+            <PollFace
+              config={config}
+              state={state}
+              now={now}
+              viewerId={engine.view.id}
+              participants={engine.view.snapshot?.participants || []}
+              open={pollOpen}
+              busy={busy}
+              controllable={controllable}
+              revision={value.revision}
+              revealing={!!revealAt}
+              act={(operation) => void act(operation)}
+            />
           )}
           {config.kind === "dice" && (
-            <>
-              <form
-                className="module-roll"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void act({
-                    kind: "roll",
-                    expression: expression.trim() || config.expression,
-                  });
-                }}
-              >
-                <input
-                  aria-label="Comando dos dados"
-                  placeholder={config.expression}
-                  value={expression}
-                  maxLength={200}
-                  readOnly={busy}
-                  onChange={(e) => setExpression(e.target.value)}
-                />
-                <button className="primary" disabled={busy}>
-                  Rolar
-                </button>
-              </form>
-              {!!state.history?.length && (
-                <Results entries={state.history.slice(-3)} />
-              )}
-            </>
+            <DiceFace
+              history={state.history || []}
+              placeholder={config.expression}
+              busy={busy}
+              participants={engine.view.snapshot?.participants || []}
+              roll={(expression) => void act({ kind: "roll", expression })}
+            />
           )}
           {config.kind === "random" && (
-            <>
-              <button
-                className="primary"
-                disabled={
-                  busy ||
-                  (config.removeDrawn &&
-                    state.drawn?.length === config.options.length)
-                }
-                onClick={() => void act({ kind: "draw" })}
-              >
-                Sortear
-              </button>
-              <small>
-                {config.removeDrawn
-                  ? config.options.length - (state.drawn?.length || 0)
-                  : config.options.length}{" "}
-                opções disponíveis
-              </small>
-              {!!state.history?.length && (
-                <Results entries={state.history.slice(-3)} />
-              )}
-            </>
+            <RaffleFace
+              config={config}
+              state={state}
+              busy={busy}
+              editable={editable}
+              current={() => pending.current ?? config}
+              save={saveConfig}
+              draw={() => void act({ kind: "draw" })}
+            />
           )}
           {config.kind === "tasks" && (
             <>
@@ -683,16 +647,6 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
               )}
             </>
           )}
-          {(config.kind === "dice" || config.kind === "random") &&
-            (state.history?.length || 0) > 1 && (
-              <button
-                // Up to three entries fit inline; short spaces show only one.
-                className={`text-button ${(state.history?.length || 0) <= 3 ? "history-short" : ""}`}
-                onClick={() => setHistory(true)}
-              >
-                Histórico ({state.history!.length})
-              </button>
-            )}
         </div>
       )}
       {error && (
@@ -700,16 +654,39 @@ export function ModuleWidget({ widget, engine, height, visible }: WidgetProps) {
           {error}
         </p>
       )}
-      {notice && (
-        <p role="status" className="field-note">
-          {notice}
-        </p>
-      )}
       <span className="sr-only" aria-live="polite">
         {state.history?.at(-1)
           ? `${state.history.at(-1)!.authorName}: ${state.history.at(-1)!.label}`
           : ""}
       </span>
+      {palettes && (config.kind === "random" || config.kind === "poll") && (
+        <Dialog title="Cor e paleta" centered close={() => setPalettes(false)}>
+          <PaletteChoice
+            current={config.palette}
+            choose={(id) => {
+              const base = pending.current ?? config;
+              if (base.kind !== "random" && base.kind !== "poll") return;
+              if (base.kind === "random") setPalettes(false);
+              saveConfig(withPalette(base, id));
+            }}
+          />
+          {config.kind === "poll" && (
+            <OptionColors
+              config={config}
+              save={(id, color) => {
+                const base = pending.current ?? config;
+                if (base.kind !== "poll") return;
+                saveConfig({
+                  ...base,
+                  options: base.options.map((o) =>
+                    o.id === id ? { ...o, color } : o,
+                  ),
+                });
+              }}
+            />
+          )}
+        </Dialog>
+      )}
       {history && (
         <Dialog title="Histórico" close={() => setHistory(false)}>
           <Results entries={state.history || []} />
@@ -803,6 +780,16 @@ function ModuleFields({
       : (config as Extract<ModuleConfig, { kind: "poll" | "random" }>).options;
   const [min, max] = rowLimits[kind];
   const noun = kind === "tasks" ? "etapa" : "opção";
+  const nextColor = (index: number) => {
+    const base = current();
+    if (base.kind !== "random" && !(base.kind === "poll" && pollColored(base)))
+      return undefined;
+    const colors = paletteColors(
+      base.palette,
+      base.options.map((o) => o.color),
+    );
+    return colorAt(colors, index);
+  };
   function setRows(edit: (rows: Row[]) => Row[]) {
     const base = current();
     if (base.kind === "tasks")
@@ -939,8 +926,14 @@ function ModuleFields({
                           id: freshKey(),
                           label: `Opção ${list.length + 1}`,
                           weight: 1,
+                          // A new option takes the next color of the palette.
+                          color: nextColor(list.length),
                         }
-                      : { id: freshKey(), label: `Opção ${list.length + 1}` },
+                      : {
+                          id: freshKey(),
+                          label: `Opção ${list.length + 1}`,
+                          color: nextColor(list.length),
+                        },
                 ])
               }
             >

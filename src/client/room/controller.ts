@@ -90,6 +90,8 @@ export class Controller {
   private intent?: { name: string; code?: string; color?: string };
   private roomEntered = false;
   roomColor = defaultColor;
+  /** The color chosen last, kept on this device and applied when entering a room. */
+  savedColor = "";
   private subscriptions = new Map<
     string,
     { nonce: string; id?: string; epoch?: string }
@@ -124,6 +126,8 @@ export class Controller {
   remoteMute = false;
   screenVolume = 0.8;
   volumes = new Map<string, number>();
+  /** Volume to restore when "Silenciar para mim" is undone. */
+  silencedVolumes = new Map<string, number>();
   private cues = new SoundCues(this.output);
   private snapshotReceivedAt = 0;
   private icePending?: Promise<IceConfig>;
@@ -192,6 +196,8 @@ export class Controller {
         this.peopleHidden = p.peopleHidden === true;
         this.fineAudio = p.fineAudio === true && this.playback.supported;
         this.previewsEnabled = p.previewsEnabled === true;
+        this.savedColor =
+          (typeof p.color === "string" && normalizeColor(p.color)) || "";
         if (this.output.supported && typeof p.outputDevice === "string")
           void this.output.restore(p.outputDevice).then(() => this.bump());
         if (Number.isFinite(p.manualGain))
@@ -255,6 +261,7 @@ export class Controller {
             peopleHidden: this.peopleHidden,
             fineAudio: this.fineAudio,
             previewsEnabled: this.previewsEnabled,
+            color: this.savedColor || undefined,
             outputDevice: this.output.pendingDeviceId || this.output.deviceId,
             manualGain: this.captures.manualGain,
             threshold: this.captures.threshold,
@@ -302,7 +309,22 @@ export class Controller {
     const result = await this.request<{ color: string }>("color", { color });
     this.roomColor = result.color;
     if (this.intent) this.intent.color = result.color;
+    this.savedColor = result.color;
+    this.savePreferences();
     this.bump();
+  }
+  /** Brings the saved color into a room just entered; a failure keeps the room's. */
+  private async applySavedColor() {
+    const color = this.savedColor;
+    if (!color || color === this.roomColor) return;
+    try {
+      const result = await this.request<{ color: string }>("color", { color });
+      this.roomColor = result.color;
+      if (this.intent) this.intent.color = result.color;
+      this.bump();
+    } catch {
+      /* The rate limit or a dropped socket only delays it to the next join. */
+    }
   }
   async initialize() {
     if (this.config) return;
@@ -674,6 +696,7 @@ export class Controller {
       this.view.error = "";
       this.view.notice = "";
       this.receiveSnapshot(result.snapshot, false);
+      void this.applySavedColor();
       if (!this.roomEntered) {
         this.roomEntered = true;
         void this.playCue("room-enter");
@@ -734,6 +757,7 @@ export class Controller {
       this.intent.color = ownColor;
     }
     this.snapshotReceivedAt = performance.now();
+    if (this.voiceBlocked) this.releaseBlockedVoice();
     const present = new Set<string>();
     for (const person of snapshot.participants)
       for (const publication of person.publications)
@@ -755,8 +779,28 @@ export class Controller {
     this.bump();
     if (this.view.status === "connected") void this.reconcile();
   }
+  /** The room owner silenced this person's voice for everyone (#122). */
+  get voiceBlocked() {
+    return !!this.view.snapshot?.participants.find((p) => p.id === this.view.id)
+      ?.voiceBlocked;
+  }
+  // The server already ended the voice publication. Let the microphone go and stay
+  // off until the owner frees it and the person turns it on again; never republish.
+  private releaseBlockedVoice() {
+    this.captures.micMuted = true;
+    if (this.captures.sources.has("voice")) this.captures.stop("voice");
+  }
   private async syncCapture(kind: Kind, ended = false) {
     if (this.view.status !== "connected") return;
+    if (
+      kind === "voice" &&
+      !ended &&
+      this.voiceBlocked &&
+      this.captures.sources.has("voice")
+    ) {
+      this.releaseBlockedVoice();
+      return;
+    }
     if (kind !== "screen" && !this.inCall && this.captures.sources.has(kind)) {
       this.captures.stop(kind);
       return;
@@ -795,12 +839,21 @@ export class Controller {
       this.bump();
       return;
     }
-    const publication = await this.request<Publication>("publish", {
-      kind,
-      key: source.key,
-      audio: source.stream.getAudioTracks().length > 0,
-      muted,
-    });
+    let publication: Publication;
+    try {
+      publication = await this.request<Publication>("publish", {
+        kind,
+        key: source.key,
+        audio: source.stream.getAudioTracks().length > 0,
+        muted,
+      });
+    } catch (e) {
+      // Blocked before our snapshot said so: same outcome, no error loop.
+      if (recoveryCode(e) !== "VOICE_BLOCKED") throw e;
+      if (this.captures.sources.get(kind) === source)
+        this.releaseBlockedVoice();
+      return;
+    }
     if (
       generation !== this.generation ||
       this.captures.sources.get(kind) !== source
@@ -890,6 +943,13 @@ export class Controller {
   togglePeople() {
     this.peopleHidden = !this.peopleHidden;
     this.savePreferences();
+  }
+  /** Personal volume for someone's voice, 0–2; above 1 uses Web Audio gain. */
+  setPersonVolume(id: string, volume: number) {
+    const next = Math.min(2, Math.max(0, volume));
+    if (next > 1) this.playback.unlock();
+    this.volumes.set(id, next);
+    this.bump();
   }
   arrangeScreens(mode: "right" | "bottom") {
     this.screenArrangement = {
@@ -1132,7 +1192,7 @@ export class Controller {
     }
   }
   async microphone() {
-    if (!this.inCall || this.voicePending) return;
+    if (!this.inCall || this.voicePending || this.voiceBlocked) return;
     const generation = this.callGeneration;
     this.voicePending = true;
     if (this.sounds) this.cues.unlock();

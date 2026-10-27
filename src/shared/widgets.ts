@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  hexColor,
   moduleConfig,
   moduleAction,
   isModule,
@@ -8,6 +9,7 @@ import {
 } from "./room-modules";
 
 const identifier = z.string().uuid();
+export const timerLapLimit = 20;
 const label = z.string().trim().min(1).max(64);
 export const widgetBlock = z.discriminatedUnion("kind", [
   z
@@ -38,6 +40,11 @@ export const widgetBlock = z.discriminatedUnion("kind", [
       loop: z.boolean().optional(),
       /** Someone turned the end alarm off; cleared by start, pause or reset. */
       silenced: z.boolean().optional(),
+      /** Stopwatch lap marks (elapsed seconds), oldest first; cleared by reset. */
+      laps: z
+        .array(z.number().min(0).max(604800))
+        .max(timerLapLimit)
+        .optional(),
     })
     .strict(),
 ]);
@@ -58,9 +65,13 @@ export const widgetContent = z
     title: label,
     blocks: z.array(widgetBlock).max(6),
     module: moduleConfig.optional(),
+    /** Accent of a one-color widget: the timer ring, the counters' buttons. */
+    color: hexColor.optional(),
   })
   .strict()
   .refine((content) => {
+    if (content.color && !["timer", "custom"].includes(contentKind(content)))
+      return false;
     if (isModule(content.kind))
       return (
         content.blocks.length === 0 &&
@@ -149,14 +160,6 @@ export interface ChatMessage {
   text: string;
   sentAt: number;
 }
-export interface ShareRequest {
-  id: string;
-  owner: string;
-  ownerName: string;
-  content: WidgetContent;
-  status: "pending" | "approved" | "denied";
-  createdAt: number;
-}
 export interface RoomNotice {
   id: string;
   text: string;
@@ -204,7 +207,7 @@ export const widgetOperation = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("timer"),
       blockId: identifier,
-      action: z.enum(["start", "pause", "reset", "silence"]),
+      action: z.enum(["start", "pause", "reset", "silence", "lap"]),
       revision: z.number().int().nonnegative(),
     })
     .strict(),
@@ -225,7 +228,6 @@ export const widgetSchemas = {
       text: z.string().trim().min(1).max(2000),
     })
     .strict(),
-  "widget-review": z.object({ id: identifier, approve: z.boolean() }).strict(),
   "widget-permission": z
     .object({
       id: identifier,
@@ -306,6 +308,23 @@ export function timerDisplay(
     : timerElapsed(block, now);
 }
 
+type TimerBlock = Extract<WidgetBlock, { kind: "timer" }>;
+/** Marks a lap on a running stopwatch. */
+function lapped(block: TimerBlock, now: number): TimerBlock {
+  const laps = block.laps ?? [];
+  if (
+    block.startedAt === null ||
+    (block.mode || (block.duration ? "down" : "up")) !== "up" ||
+    laps.length >= timerLapLimit
+  )
+    throw new Error("LAP_UNAVAILABLE");
+  return { ...block, laps: [...laps, timerElapsed(block, now)] };
+}
+/** Lap lengths in seconds, oldest first. */
+export function lapTimes(block: TimerBlock) {
+  return (block.laps ?? []).map((mark, i, all) => mark - (all[i - 1] ?? 0));
+}
+
 /** Pure operation semantics shared by the local widget and authoritative server. */
 export function operateWidget(
   widget: SharedWidget,
@@ -336,18 +355,27 @@ export function operateWidget(
             operation.kind === "timer" &&
             operation.action === "silence"
           ? { ...block, silenced: true }
-          : block.kind === "timer" && operation.kind === "timer"
-            ? {
-                ...block,
-                silenced: undefined,
-                elapsed:
-                  operation.action === "reset" ||
-                  (operation.action === "start" && timerFinished(block, now))
-                    ? 0
-                    : timerElapsed(block, now),
-                startedAt: operation.action === "start" ? now : null,
-              }
-            : block;
+          : block.kind === "timer" &&
+              operation.kind === "timer" &&
+              operation.action === "lap"
+            ? lapped(block, now)
+            : block.kind === "timer" && operation.kind === "timer"
+              ? {
+                  ...block,
+                  silenced: undefined,
+                  laps:
+                    operation.action === "reset" ||
+                    (operation.action === "start" && timerFinished(block, now))
+                      ? undefined
+                      : block.laps,
+                  elapsed:
+                    operation.action === "reset" ||
+                    (operation.action === "start" && timerFinished(block, now))
+                      ? 0
+                      : timerElapsed(block, now),
+                  startedAt: operation.action === "start" ? now : null,
+                }
+              : block;
   return {
     ...widget,
     revision: widget.revision + 1,
