@@ -1,22 +1,11 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type ComponentType,
-} from "react";
-import { HeaderTools } from "./header-tools";
+import { useEffect, useRef, useState, type ComponentType } from "react";
+import type { Slot as CaptureSlot } from "../media/capture";
 import {
   MonitorUp,
   Settings2,
-  Volume2,
-  VolumeX,
   Users,
-  Headphones,
-  Eye,
-  SlidersHorizontal,
+  Radio,
   Activity,
-  Clock3,
   MessageCircle,
   PencilRuler,
   Timer,
@@ -26,15 +15,18 @@ import {
   Shuffle,
   ListTodo,
   Palette,
+  Video,
+  LayoutGrid,
   type LucideIcon,
 } from "lucide-react";
 import type { MenuItem } from "../components/ContextMenu";
 import type { Controller } from "../room/controller";
 import { Media } from "../components/Media";
-import { ParticipantCard } from "../components/ParticipantCard";
+import { PeopleWidget } from "./PeopleWidget";
+import { CamerasWidget, pinCamera } from "./CamerasWidget";
+import { MyStreamWidget } from "./MyStreamWidget";
 import { Spectators } from "../components/Spectators";
-import { RoomLimit } from "../components/RoomStatus";
-import { screenResolutions } from "../../shared/protocol";
+import { ScreenTimer } from "../components/RoomStatus";
 import { ScreenVolume } from "../components/ScreenVolume";
 import { CustomWidget, createContent, widgetValue } from "./CustomWidget";
 import { ChatWidget } from "./ChatWidget";
@@ -53,6 +45,8 @@ export interface WidgetProps {
   people: () => void;
   diagnostics: () => void;
   share: () => void;
+  /** Trocar o que transmito: a new source on the same publication (#160). */
+  replaceShare: (slot: CaptureSlot) => void;
 }
 export interface WidgetDefinition {
   id: string;
@@ -158,320 +152,6 @@ function ScreenWidget({
     </div>
   );
 }
-function PeopleWidget({ engine, visible, people, widget }: WidgetProps) {
-  const ids = useRef(new Set<string>());
-  const preview = useCallback(
-    (id: string, state: boolean) => {
-      if (state) ids.current.add(id);
-      else ids.current.delete(id);
-      engine.previews([...ids.current], widget.id);
-    },
-    [engine, widget.id],
-  );
-  useEffect(() => () => engine.previews([], widget.id), [engine, widget.id]);
-  const members =
-    engine.view.snapshot?.participants.filter(
-      (p) => widget.type !== "call" || p.inCall,
-    ) || [];
-  const total = engine.view.snapshot?.participants.length || 0;
-  return (
-    <div className="widget-people">
-      <HeaderTools>
-        <span
-          className="widget-count"
-          aria-label={`${members.length} ${members.length === 1 ? "pessoa" : "pessoas"}`}
-        >
-          {members.length}
-        </span>
-        {total >= 6 && <RoomLimit count={total} threshold={6} />}
-      </HeaderTools>
-      <div className="widget-people-grid">
-        {members.map((person) => (
-          <ParticipantCard
-            key={person.id}
-            person={person}
-            engine={engine}
-            visible={visible}
-            onVisible={preview}
-            onEditColor={people}
-          />
-        ))}
-      </div>
-      {!members.length && <p className="widget-empty">Ninguém na chamada.</p>}
-    </div>
-  );
-}
-function MixerWidget({ engine }: WidgetProps) {
-  const screens = engine.view.watching.filter(
-    (id) => engine.screenInfo(id)?.publication.owner !== engine.view.id,
-  );
-  const voices =
-    engine.view.snapshot?.participants.filter(
-      (p) => p.id !== engine.view.id && p.inCall,
-    ) || [];
-  return (
-    <div className="widget-mixer">
-      {screens.map((id) => {
-        const level = engine.screenLevel(id);
-        const name = engine.screenInfo(id)?.name || "Participante";
-        return (
-          <div className="mixer-row" key={id}>
-            <label>
-              Tela · {name}
-              <output>{Math.round(level.volume * 100)}%</output>
-              <input
-                aria-label={`Volume da tela de ${name}`}
-                type="range"
-                min={0}
-                max={engine.fineAudio ? 3 : 1}
-                step={0.05}
-                value={level.volume}
-                onChange={(e) =>
-                  engine.setScreenLevel(id, { volume: +e.target.value })
-                }
-              />
-            </label>
-            <button
-              className="icon-button"
-              aria-label={`${level.muted ? "Ativar" : "Silenciar"} tela de ${name}`}
-              onClick={() => engine.setScreenLevel(id, { muted: !level.muted })}
-            >
-              {level.muted ? <VolumeX /> : <Volume2 />}
-            </button>
-          </div>
-        );
-      })}
-      {voices.map((person) => (
-        <div className="mixer-row" key={person.id}>
-          <label>
-            Voz · {person.name}
-            <output>
-              {Math.round((engine.volumes.get(person.id) ?? 1) * 100)}%
-            </output>
-            <input
-              aria-label={`Volume da voz de ${person.name}`}
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={engine.volumes.get(person.id) ?? 1}
-              onChange={(e) => {
-                engine.volumes.set(person.id, +e.target.value);
-                engine.bump();
-              }}
-            />
-          </label>
-          <button
-            className="icon-button"
-            aria-label={`Alternar silêncio da voz de ${person.name}`}
-            onClick={() => {
-              engine.volumes.set(
-                person.id,
-                (engine.volumes.get(person.id) ?? 1) === 0 ? 1 : 0,
-              );
-              engine.bump();
-            }}
-          >
-            {engine.volumes.get(person.id) === 0 ? <VolumeX /> : <Volume2 />}
-          </button>
-        </div>
-      ))}
-      {!screens.length && !voices.length && (
-        <p className="widget-empty">Nenhuma voz ou tela para ajustar.</p>
-      )}
-    </div>
-  );
-}
-function ConnectionWidget({ engine }: WidgetProps) {
-  return (
-    <div className="widget-connection">
-      <p>
-        Servidor <strong>{engine.view.signalingPing ?? "—"} ms</strong>
-      </p>
-      {engine.peers
-        .infos()
-        .filter((p) => p.tier === "main")
-        .map((p) => (
-          <section key={p.id}>
-            <strong>
-              {engine.screenInfo(p.publicationId)?.name ||
-                (p.kind === "voice" ? "Voz" : "Mídia")}{" "}
-              · {p.sending ? "envio" : "recepção"}
-            </strong>
-            <dl>
-              <div>
-                <dt>RTT da mídia</dt>
-                <dd>{p.rtt ?? "—"} ms</dd>
-              </div>
-              <div>
-                <dt>Bitrate</dt>
-                <dd>{p.bitrate ?? "—"} kbps</dd>
-              </div>
-              <div>
-                <dt>Perda RTP</dt>
-                <dd>
-                  {p.loss === undefined
-                    ? "Indisponível"
-                    : `${p.loss.toFixed(1)}%`}
-                </dd>
-              </div>
-              {p.kind === "screen" && (
-                <>
-                  <div>
-                    <dt>Resolução</dt>
-                    <dd>
-                      {p.width && p.height
-                        ? `${p.width} × ${p.height}`
-                        : "Indisponível"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>FPS</dt>
-                    <dd>{p.fps ?? "Indisponível"}</dd>
-                  </div>
-                </>
-              )}
-            </dl>
-          </section>
-        ))}
-    </div>
-  );
-}
-function TimeWidget({ engine, visible }: WidgetProps) {
-  const [now, setNow] = useState(0);
-  useEffect(() => {
-    if (!visible) return;
-    const update = () => setNow(engine.serverNow());
-    update();
-    const timer = setInterval(update, 1000);
-    return () => clearInterval(timer);
-  }, [engine, visible]);
-  const show = (seconds: number) =>
-    `${String(Math.floor(seconds / 3600)).padStart(2, "0")}:${String(Math.floor(seconds / 60) % 60).padStart(2, "0")}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
-  const publication = engine.publications.get("screen");
-  return (
-    <div className="widget-time">
-      <span>Sala aberta há</span>
-      <output>{show(engine.roomSeconds())}</output>
-      {publication?.createdAt && (
-        <>
-          <span>Sua transmissão</span>
-          <output>
-            {show(Math.max(0, (now - publication.createdAt) / 1000))}
-          </output>
-        </>
-      )}
-    </div>
-  );
-}
-function ViewersWidget({ engine }: WidgetProps) {
-  const own = engine.publications.get("screen");
-  const viewers = new Set(
-    engine.view.snapshot?.screenViewers?.[own?.id || ""] || [],
-  );
-  return (
-    <div className="widget-viewers">
-      {own ? (
-        <>
-          <p>
-            {viewers.size}{" "}
-            {viewers.size === 1 ? "pessoa assistindo" : "pessoas assistindo"}
-          </p>
-          <ul>
-            {engine.view.snapshot?.participants
-              .filter((p) => viewers.has(p.id))
-              .map((p) => (
-                <li key={p.id}>{p.name}</li>
-              ))}
-          </ul>
-        </>
-      ) : (
-        <p className="widget-empty">Você não está transmitindo.</p>
-      )}
-    </div>
-  );
-}
-function QuickWidget({ engine, share }: WidgetProps) {
-  const quality = engine.captures.quality;
-  const publication = engine.publications.get("screen");
-  return (
-    <div className="widget-quick">
-      <div className="widget-quick-row">
-        <select
-          aria-label="Resolução"
-          value={quality.resolution}
-          onChange={(e) =>
-            void engine
-              .quality({ ...quality, resolution: +e.target.value })
-              .catch((e) => engine.fail(e))
-          }
-        >
-          {screenResolutions.map((p) => (
-            <option key={p} value={p}>
-              {p}p
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Quadros por segundo"
-          value={quality.fps}
-          onChange={(e) =>
-            void engine
-              .quality({ ...quality, fps: +e.target.value })
-              .catch((e) => engine.fail(e))
-          }
-        >
-          {[5, 15, 24, 30, 60].map((f) => (
-            <option key={f} value={f}>
-              {f} FPS
-            </option>
-          ))}
-        </select>
-      </div>
-      {publication ? (
-        <div className="widget-quick-row">
-          <button
-            className="secondary"
-            onClick={() => {
-              const track = engine.captures.sources
-                .get("screen")
-                ?.stream.getVideoTracks()[0];
-              if (!track) return;
-              track.enabled = !track.enabled;
-              void engine
-                .request("state", {
-                  publicationId: publication.id,
-                  muted: !track.enabled,
-                })
-                .catch((e) => engine.fail(e));
-              engine.bump();
-            }}
-          >
-            {publication.muted ? "Retomar vídeo" : "Pausar vídeo"}
-          </button>
-          <button
-            className="secondary"
-            onClick={share}
-            title={
-              publication.audio ? "Áudio da fonte incluído" : "Fonte sem áudio"
-            }
-          >
-            {publication.audio ? (
-              <Volume2 size={15} aria-hidden="true" />
-            ) : (
-              <VolumeX size={15} aria-hidden="true" />
-            )}
-            Trocar fonte
-          </button>
-        </div>
-      ) : (
-        <button className="primary" onClick={share}>
-          <MonitorUp size={17} /> Compartilhar
-        </button>
-      )}
-    </div>
-  );
-}
 const definition = (
   id: string,
   title: string,
@@ -491,12 +171,8 @@ const definition = (
     {
       screen: MonitorUp,
       people: Users,
-      call: Headphones,
-      viewers: Eye,
-      mixer: SlidersHorizontal,
-      connection: Activity,
-      time: Clock3,
-      quick: Settings2,
+      cameras: Video,
+      stream: Radio,
       chat: MessageCircle,
       canvas: PencilRuler,
       timer: Timer,
@@ -523,55 +199,37 @@ export const widgetRegistry: Record<string, WidgetDefinition> = {
   ),
   people: definition(
     "people",
-    "Pessoas na sala",
-    "Quem está aqui, compartilha e participa da chamada.",
+    "Pessoas",
+    "Quem está na chamada e na sala, com o volume de cada voz.",
     PeopleWidget,
     true,
     colorItem,
   ),
-  call: definition(
-    "call",
-    "Pessoas na chamada",
-    "Voz, câmera e indicadores de fala.",
-    PeopleWidget,
-    true,
-    colorItem,
-  ),
-  viewers: definition(
-    "viewers",
-    "Meus espectadores",
-    "Quem mantém sua transmissão conectada.",
-    ViewersWidget,
-  ),
-  mixer: definition(
-    "mixer",
-    "Mixer de volume",
-    "Vozes e transmissões num só lugar.",
-    MixerWidget,
-  ),
-  connection: definition(
-    "connection",
-    "Conexão",
-    "Ping, bitrate, perda e qualidade da mídia.",
-    ConnectionWidget,
+  cameras: definition(
+    "cameras",
+    "Câmeras",
+    "Quem fala em destaque; fixe uma câmera pelo botão direito.",
+    CamerasWidget,
     false,
-    ({ diagnostics }) => [
+    ({ widget, engine }) =>
+      widget.config.pinned
+        ? [
+            {
+              label: "Mostrar todas",
+              icon: LayoutGrid,
+              run: () => pinCamera(engine, widget.id, undefined),
+            },
+          ]
+        : [],
+  ),
+  stream: definition(
+    "stream",
+    "Minha transmissão",
+    "Prévia, quem assiste, conexão e controles da sua tela.",
+    MyStreamWidget,
+    false,
+    ({ diagnostics, settings }) => [
       { label: "Detalhes da conexão", icon: Activity, run: diagnostics },
-    ],
-  ),
-  time: definition(
-    "time",
-    "Tempo da sala",
-    "Duração da sala e do seu compartilhamento.",
-    TimeWidget,
-  ),
-  quick: definition(
-    "quick",
-    "Minha tela",
-    "Qualidade, FPS e pausa do vídeo.",
-    QuickWidget,
-    true,
-    ({ settings }) => [
       { label: "Todos os ajustes", icon: Settings2, run: settings },
     ],
   ),
@@ -614,14 +272,14 @@ export const widgetRegistry: Record<string, WidgetDefinition> = {
   ),
   custom: definition(
     "custom",
-    "Personalizado",
-    "Um placar com os seus contadores de pontos.",
+    "Placar",
+    "Contadores de pontos, um para cada jogador ou time.",
     CustomWidget,
   ),
 };
 export function createWidget(type: string): WidgetInstance {
   const def = widgetRegistry[type];
-  if (!def || ["custom", "notes", "canvas", "chat"].includes(type))
+  if (!def || ["notes", "canvas", "chat"].includes(type))
     throw new Error("Widget indisponível.");
   return {
     id: freshKey(),
@@ -654,6 +312,10 @@ export function HeaderAccessory({
 }) {
   return widget.type === "screen" ? (
     <>
+      <ScreenTimer
+        engine={engine}
+        publicationId={widget.config.publicationId}
+      />
       <ScreenVolume engine={engine} id={widget.config.publicationId} />
       <Spectators engine={engine} publicationId={widget.config.publicationId} />
     </>

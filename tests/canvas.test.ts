@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  autoGrid,
   CanvasStore,
   fitted,
   focusedWidgetId,
@@ -65,10 +66,10 @@ function filled(count: number) {
   store.change((s) => {
     s.widgets = [];
     s.floating = [];
-    s.preset = "grid-1";
+    s.preset = "grid-1x1";
     s.slots = s.slots.slice(0, 1);
   });
-  for (let i = 1; i < count; i++) store.addSlot();
+  store.preset(autoGrid(count));
   for (let i = 0; i < count; i++) store.add(widget(`video-${i}`));
   return store;
 }
@@ -107,7 +108,7 @@ test("grid cheio não expande sozinho; criar espaço é explícito e permite mai
   assert.deepEqual(store.getSnapshot().slots, before.slots);
   assert.equal(store.getSnapshot().pending[0].id, "seventh");
   store.accept("seventh", widget("seventh"), "new");
-  assert.equal(store.getSnapshot().slots.length, 7);
+  assert.equal(store.getSnapshot().slots.length, 8, "grade 2 × 4");
   assert.equal(store.getSnapshot().slots[6].widgetId, "seventh");
   assert.equal(store.getSnapshot().floating.length, 0);
 });
@@ -122,7 +123,7 @@ test("aceitar flutuante libera convite sem mudar os demais espaços", () => {
 });
 test("tela grande participa do grid; focar troca posições e não ativa foco único", () => {
   const store = filled(4);
-  store.preset("focus-left");
+  store.preset("strip-left");
   const ids = store.getSnapshot().widgets.map((w) => w.id);
   store.focus("video-2");
   assert.equal(store.getSnapshot().slots[0].widgetId, "video-2");
@@ -241,14 +242,73 @@ test("layout corrompido e posições fora da tela não tornam o app inacessível
   );
 });
 
-test("reduzir preset preserva os widgets visíveis, sem esconder nem sobrepor", () => {
+test("grade menor manda o que não cabe para não exibidos; maior traz de volta", () => {
   const store = filled(4);
-  store.preset("grid-1");
-  assert.equal(store.getSnapshot().slots.length, 4);
-  assert.equal(store.getSnapshot().floating.length, 0);
+  store.remove("video-1");
+  store.preset("grid-1x2");
+  const shrunk = store.getSnapshot();
+  assert.deepEqual(
+    shrunk.slots.map((s) => s.widgetId),
+    ["video-0", "video-2"],
+  );
+  assert.deepEqual(shrunk.hidden, ["video-3"]);
+  assert.equal(shrunk.floating.length, 0);
+  assert.equal(shrunk.widgets.length, 3, "nenhum widget fecha");
+  store.preset("grid-2x2");
+  assert.deepEqual(
+    store.getSnapshot().slots.map((s) => s.widgetId),
+    ["video-0", "video-2", "video-3", undefined],
+  );
   assert.equal(store.getSnapshot().hidden.length, 0);
-  store.focus("video-2");
-  assert.equal(store.getSnapshot().slots[0].widgetId, "video-2");
+  store.preset("grid-1x1");
+  store.focus("video-3");
+  assert.equal(store.getSnapshot().slots[0].widgetId, "video-3");
+  assert.ok(store.getSnapshot().hidden.includes("video-0"));
+  store.preset("strip-left");
+  assert.equal(store.getSnapshot().hidden.length, 0, "a tira mostra todos");
+});
+
+test("Mostrar sem espaço livre substitui o espaço escolhido", () => {
+  const store = filled(2);
+  store.preset("grid-1x2");
+  const target = store.getSnapshot().slots[1].id;
+  store.replace(
+    { id: "room", type: "timer", title: "Cronômetro", config: {} },
+    target,
+  );
+  const state = store.getSnapshot();
+  assert.equal(state.slots[1].widgetId, "room");
+  assert.deepEqual(state.hidden, ["video-1"], "o substituído vira não exibido");
+  assert.equal(state.floating.length, 0);
+});
+
+test("grade automática cresce até 3 × 4 e restauração migra presets antigos", () => {
+  assert.equal(autoGrid(1), "grid-1x1");
+  assert.equal(autoGrid(3), "grid-1x3");
+  assert.equal(autoGrid(4), "grid-2x2");
+  assert.equal(autoGrid(5), "grid-2x3");
+  assert.equal(autoGrid(9), "grid-3x3");
+  assert.equal(autoGrid(40), "grid-3x4");
+  const store = filled(12);
+  store.addSlot();
+  assert.equal(store.getSnapshot().slots.length, 12);
+  const old = { ...newCanvas(), preset: "grid-6" } as unknown;
+  const restored = restoreCanvas(old);
+  assert.equal(restored.preset, "grid-2x3");
+  assert.equal(restored.slots.length, 6);
+  const focus = restoreCanvas({ ...newCanvas(), preset: "focus-top" });
+  assert.equal(focus.preset, "strip-top");
+  const saved = filled(4).getSnapshot();
+  saved.slots[3] = { id: saved.slots[3].id };
+  saved.hidden = ["video-3"];
+  const kept = restoreCanvas(
+    persistentCanvas({
+      ...saved,
+      widgets: saved.widgets.map((w) => ({ ...w, transient: false })),
+    }),
+  );
+  assert.deepEqual(kept.hidden, ["video-3"]);
+  assert.equal(kept.floating.length, 0);
 });
 
 test("foco único usa o espaço grande depois de mudança de preset e foco antigo", () => {
@@ -379,7 +439,7 @@ test("rodada E: mescla só vazios contíguos da tira, preserva posições e divi
     store.getSnapshot().slots.map((s) => s.id),
     original,
   );
-  store.preset("grid-4");
+  store.preset("grid-2x2");
   store.mergeSlots(original[1], original[2]);
   assert.equal(store.getSnapshot().slots.length, 4);
 });
@@ -392,7 +452,7 @@ test("rodada E: trocar orientação preserva spans, voltar ao automático divide
   store.preset("strip-top");
   assert.equal(store.getSnapshot().slots.length, 3);
   assert.deepEqual(store.getSnapshot().slots[1].span, { rows: 2, columns: 1 });
-  store.preset("grid-4");
+  store.preset("grid-2x2");
   assert.equal(store.getSnapshot().slots.length, 4);
   assert.equal(store.getSnapshot().slots[1].widgetId, "span");
   assert.ok(store.getSnapshot().slots.every((s) => !s.span));
@@ -414,4 +474,67 @@ test("rodada E: migração remove Notas canceladas e mantém cronômetro individ
   assert.equal(restored.slots[0].widgetId, undefined);
   assert.equal(restored.slots[1].widgetId, "timer");
   assert.equal(restored.schemaVersion, 2);
+});
+
+test("#161: widget Tempo da sala sai do layout e libera o espaço", () => {
+  const state = newCanvas();
+  state.widgets = [
+    { id: "time", type: "time", title: "Tempo da sala", config: {} },
+  ];
+  state.slots[0].widgetId = "time";
+  const restored = restoreCanvas(state);
+  assert.deepEqual(restored.widgets, []);
+  assert.equal(restored.slots[0].widgetId, undefined);
+});
+
+test("#159: Pessoas na sala, na chamada e Mixer viram um só Pessoas no mesmo espaço", () => {
+  const state = newCanvas();
+  state.widgets = [
+    { id: "call", type: "call", title: "Pessoas na chamada", config: {} },
+    { id: "mixer", type: "mixer", title: "Mixer de volume", config: {} },
+    { id: "room", type: "people", title: "Pessoas na sala", config: {} },
+    { id: "chat", type: "chat", title: "Chat", config: {} },
+  ];
+  state.slots[0].widgetId = "mixer";
+  state.slots[1].widgetId = "call";
+  state.slots[2].widgetId = "room";
+  state.slots[3].widgetId = "chat";
+  const restored = restoreCanvas(state);
+  assert.deepEqual(
+    restored.widgets.map((w) => [w.id, w.type, w.title]),
+    [
+      ["call", "people", "Pessoas"],
+      ["chat", "chat", "Chat"],
+    ],
+  );
+  assert.deepEqual(
+    restored.slots.map((s) => s.widgetId),
+    [undefined, "call", undefined, "chat"],
+  );
+});
+
+test("#160: Meus espectadores, Conexão e Minha tela viram uma só Minha transmissão", () => {
+  const state = newCanvas();
+  state.widgets = [
+    { id: "a", type: "connection", title: "Conexão", config: {} },
+    { id: "b", type: "viewers", title: "Meus espectadores", config: {} },
+    { id: "c", type: "quick", title: "Minha tela", config: {} },
+    { id: "d", type: "people", title: "Pessoas", config: {} },
+  ];
+  state.slots[0].widgetId = "b";
+  state.slots[1].widgetId = "a";
+  state.slots[2].widgetId = "c";
+  state.slots[3].widgetId = "d";
+  const restored = restoreCanvas(state);
+  assert.deepEqual(
+    restored.widgets.map((w) => [w.id, w.type, w.title]),
+    [
+      ["a", "stream", "Minha transmissão"],
+      ["d", "people", "Pessoas"],
+    ],
+  );
+  assert.deepEqual(
+    restored.slots.map((s) => s.widgetId),
+    [undefined, "a", undefined, "d"],
+  );
 });

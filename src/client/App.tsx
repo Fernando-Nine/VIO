@@ -1,4 +1,5 @@
 import { permissionText, roleAllows, roomRole } from "../shared/permissions";
+import type { Slot as CaptureSlot } from "./media/capture";
 import {
   lazy,
   Suspense,
@@ -29,6 +30,7 @@ import {
   Mic,
   MicOff,
   MonitorUp,
+  Plus,
   Pause,
   Settings2,
   Users,
@@ -48,6 +50,7 @@ import {
   RoomTimer,
   RoomLimit,
 } from "./components/RoomStatus";
+import { FullscreenVolume } from "./components/ScreenVolume";
 import { usePictureInPicture } from "./media/picture-in-picture";
 import { PeoplePanel } from "./components/PeoplePanel";
 const RoomCanvas = lazy(() =>
@@ -56,16 +59,18 @@ const RoomCanvas = lazy(() =>
   })),
 );
 import { Landing } from "./components/Landing";
+import { ToastStack, toasts } from "./components/Toasts";
 import { releases, version } from "../shared/releases";
 import { api, invite } from "./endpoint";
-import { desktop } from "./desktop/bridge";
-import { NativeShare } from "./desktop/NativeShare";
+import { applyMotion } from "./components/motion";
+import { ShareDialog } from "./components/ShareDialog";
 type Panel =
   | "people"
   | "settings"
   | "color"
   | "about"
   | "share"
+  | "replace"
   | "history"
   | null;
 const ownerBlockedText =
@@ -81,11 +86,11 @@ function Brand() {
 export default function App({ engine }: { engine: Controller }) {
   const view = useSyncExternalStore(engine.subscribe, engine.getSnapshot);
   const [panel, setPanel] = useState<Panel>(null);
+  const [replaceSlot, setReplaceSlot] = useState<CaptureSlot>("screen");
   const [name, setName] = useState("");
   const [code, setCode] = useState(
     new URLSearchParams(location.search).get("sala") || "",
   );
-  const [audio, setAudio] = useState(true);
   const [copied, setCopied] = useState(false);
   function showPeople() {
     // The icon toggles the side panel (docs/design/pessoas.md).
@@ -93,6 +98,7 @@ export default function App({ engine }: { engine: Controller }) {
   }
   const [active, setActive] = useState(true);
   const [full, setFull] = useState(false);
+  useEffect(() => applyMotion(engine.motion), [engine.motion]);
   const player = useRef<HTMLDivElement>(null);
   const playerMount = useRef<HTMLDivElement>(null);
   const dock = useRef<HTMLElement>(null);
@@ -169,13 +175,25 @@ export default function App({ engine }: { engine: Controller }) {
   const people = view.snapshot?.participants || [];
   const all = people.flatMap((m) => m.publications);
   const screens = all.filter((p) => p.kind === "screen");
+  // Sounds without an image (#236) have their own chip, never the screen volume.
+  const fullscreenScreen = [view.selected, ...view.watching].find(
+    (id) => id && !engine.screenInfo(id)?.publication.audioOnly,
+  );
   const watching = view.watching.length > 0;
   const available = screens.filter((p) => !view.watching.includes(p.id));
   const availableKey = available.map((p) => p.id).join(",");
   useEffect(() => {
     if (availableKey) wake();
   }, [availableKey, wake]);
-  const hasScreen = engine.captures.sources.has("screen");
+  // Up to MAX_SCREENS shares at once (#194).
+  const sharing = engine.captures.screens;
+  const hasScreen = sharing.length > 0;
+  // A lone sound without an image (#236) is not a screen to the person sharing.
+  const stopOne =
+    sharing.length === 1 && engine.publications.get(sharing[0].slot)?.audioOnly
+      ? "Parar som"
+      : "Parar tela";
+  const moreScreens = !!engine.captures.nextScreen();
   const hasVoice = engine.captures.sources.has("voice");
   const hasCamera = engine.captures.sources.has("camera");
   const micMuted =
@@ -267,6 +285,27 @@ export default function App({ engine }: { engine: Controller }) {
       engine.fail(e);
     }
   }
+  // In the room, errors and notices use the toast stack; the landing and
+  // open sheets keep the inline notice.
+  const inRoom = !!view.snapshot;
+  const failed = view.status === "failed";
+  useEffect(() => {
+    const text = inRoom && !panel ? view.error || view.notice : "";
+    if (!text) {
+      toasts.close("engine", false);
+      return;
+    }
+    toasts.push({
+      id: "engine",
+      kind: view.error ? "error" : "important",
+      label: text,
+      text,
+      action: failed
+        ? { label: "Reconectar", run: () => void engine.retry() }
+        : undefined,
+      onClose: () => engine.dismiss(),
+    });
+  }, [inRoom, panel, view.error, view.notice, failed, engine]);
   const notice = (view.error || view.notice) && (
     <div
       className={`notice ${view.error ? "error" : ""}`}
@@ -315,6 +354,7 @@ export default function App({ engine }: { engine: Controller }) {
                 <span>{view.snapshot.code}</span>
                 <Copy size={14} />
               </button>
+              <RoomTimer engine={engine} />
             </>
           )}
         </div>
@@ -416,7 +456,7 @@ export default function App({ engine }: { engine: Controller }) {
                 onPointerLeave={wake}
                 data-idle={!active && !panel && watching}
               >
-                {!panel && notice}
+                <ToastStack />
                 <Suspense
                   fallback={
                     <div className="player-empty" role="status">
@@ -431,6 +471,10 @@ export default function App({ engine }: { engine: Controller }) {
                     people={() => open("color")}
                     diagnostics={() => open("about")}
                     share={() => open("share")}
+                    replaceShare={(slot) => {
+                      setReplaceSlot(slot);
+                      open("replace");
+                    }}
                     fullscreen={() => void fullscreen()}
                     isFullscreen={full}
                     interaction={(busy) => {
@@ -497,12 +541,17 @@ export default function App({ engine }: { engine: Controller }) {
                           <span>Microfone</span>
                         </button>
                         <button
-                          className={`dock-button ${engine.captures.deaf ? "muted" : ""}`}
+                          className={`dock-button audio-off ${engine.captures.deaf ? "is-off" : ""}`}
                           aria-pressed={engine.captures.deaf}
                           aria-label={
                             engine.captures.deaf
-                              ? "Desativar ensurdecer"
-                              : "Ensurdecer"
+                              ? "Reativar áudio"
+                              : "Desativar áudio"
+                          }
+                          title={
+                            engine.captures.deaf
+                              ? "Reativar áudio"
+                              : "Desativar áudio\nDesliga seu microfone e as vozes. As telas continuam."
                           }
                           onClick={() => engine.deafen()}
                         >
@@ -511,7 +560,11 @@ export default function App({ engine }: { engine: Controller }) {
                           ) : (
                             <Headphones />
                           )}
-                          <span>Áudio</span>
+                          <span>
+                            {engine.captures.deaf
+                              ? "Áudio desativado"
+                              : "Áudio"}
+                          </span>
                         </button>
                         <button
                           className={`dock-button dock-wide ${hasCamera ? "enabled" : ""}`}
@@ -547,11 +600,21 @@ export default function App({ engine }: { engine: Controller }) {
                   >
                     <button
                       className={`share-button ${hasScreen ? "sharing" : ""}`}
-                      aria-label={hasScreen ? "Parar tela" : "Compartilhar"}
+                      aria-label={
+                        sharing.length > 1
+                          ? `Parar as ${sharing.length} telas`
+                          : hasScreen
+                            ? stopOne
+                            : "Compartilhar"
+                      }
                       disabled={(!canShare || !!screenBlocked) && !hasScreen}
                       title={hasScreen ? undefined : screenBlocked}
                       onClick={() =>
-                        hasScreen ? void engine.stop("screen") : open("share")
+                        hasScreen
+                          ? sharing.forEach(
+                              ({ slot }) => void engine.stop(slot),
+                            )
+                          : open("share")
                       }
                     >
                       {hasScreen ? (
@@ -561,11 +624,25 @@ export default function App({ engine }: { engine: Controller }) {
                       )}
                       <span>
                         <b className="dock-wide">
-                          {hasScreen ? "Parar tela" : "Compartilhar"}
+                          {sharing.length > 1
+                            ? `Parar telas (${sharing.length})`
+                            : hasScreen
+                              ? stopOne
+                              : "Compartilhar"}
                         </b>
                         <b className="dock-narrow">Tela</b>
                       </span>
                     </button>
+                    {hasScreen && moreScreens && canShare && !screenBlocked && (
+                      <button
+                        className="dock-button share-more"
+                        aria-label="Compartilhar outra tela"
+                        title="Compartilhar outra tela"
+                        onClick={() => open("share")}
+                      >
+                        <Plus size={18} />
+                      </button>
+                    )}
                     {pip.supported && !full && (
                       <button
                         className="dock-button dock-wide"
@@ -582,6 +659,9 @@ export default function App({ engine }: { engine: Controller }) {
                         <PictureInPicture2 />
                         <span>Flutuante</span>
                       </button>
+                    )}
+                    {full && fullscreenScreen && (
+                      <FullscreenVolume engine={engine} id={fullscreenScreen} />
                     )}
                     {full && (
                       <button
@@ -692,9 +772,7 @@ export default function App({ engine }: { engine: Controller }) {
                 stream={engine.peers.stream(p.id)}
                 output={engine.output}
                 playback={engine.playback}
-                muted={
-                  !engine.inCall || engine.captures.deaf || engine.remoteMute
-                }
+                muted={!engine.inCall || engine.captures.deaf}
                 volume={
                   (engine.volumes.get(p.owner) ?? 1) * engine.masterVolume
                 }
@@ -724,16 +802,20 @@ export default function App({ engine }: { engine: Controller }) {
               settings: "Ajustes",
               color: "Minha cor na sala",
               about: "Sobre a sala",
-              share: "Compartilhar sua tela",
+              share: "Compartilhar tela",
+              replace: "Trocar o que transmito",
               history: "O VIO está crescendo",
             }[panel]
           }
+          centered={panel === "share" || panel === "replace"}
           className={
             panel === "settings"
               ? "sheet-settings"
               : panel === "people"
                 ? "sheet-people"
-                : undefined
+                : panel === "share" || panel === "replace"
+                  ? "sheet-share"
+                  : undefined
           }
           close={() => open(null)}
         >
@@ -742,46 +824,21 @@ export default function App({ engine }: { engine: Controller }) {
             <PeoplePanel engine={engine} editColor={() => open("color")} />
           )}
           {panel === "settings" && (
-            <Settings engine={engine} openPeople={() => open("people")} />
+            <Settings
+              engine={engine}
+              openPeople={() => open("people")}
+              openHistory={() => open("history")}
+            />
           )}
-          {panel === "share" && desktop && (
-            <NativeShare engine={engine} close={() => open(null)} />
-          )}
-          {panel === "share" && !desktop && (
-            <>
-              <div className="share-intro">
-                <MonitorUp size={32} />
-                <p>Você escolhe o que compartilhar no seletor do navegador.</p>
-              </div>
-              <label className="toggle">
-                <span>
-                  Incluir áudio da tela
-                  <small>
-                    A trilha de áudio depende da fonte e do navegador.
-                  </small>
-                </span>
-                <input
-                  type="checkbox"
-                  role="switch"
-                  checked={audio}
-                  onChange={(e) => setAudio(e.target.checked)}
-                />
-              </label>
-              <p className="field-note">
-                Para assistir com som, procure a opção de compartilhar áudio ao
-                escolher a fonte. O som do sistema pode incluir a conversa da
-                sala.
-              </p>
-              <button
-                className="primary full-width"
-                onClick={() => {
-                  void engine.startScreen(audio);
-                  open(null);
-                }}
-              >
-                Escolher tela <ArrowUpRight size={18} />
-              </button>
-            </>
+          {(panel === "share" || panel === "replace") && (
+            <ShareDialog
+              engine={engine}
+              close={() => open(null)}
+              replace={panel === "replace"}
+              slot={
+                panel === "replace" ? replaceSlot : engine.captures.nextScreen()
+              }
+            />
           )}
           {panel === "color" && <ColorPicker engine={engine} />}
           {panel === "about" && (

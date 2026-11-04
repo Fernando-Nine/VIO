@@ -16,13 +16,17 @@ import {
   ArrowLeftRight,
   Ellipsis,
   Grip,
+  LayoutGrid,
   Pencil,
-  Power,
+  Minus,
+  PictureInPicture2,
   ShieldCheck,
   X,
 } from "lucide-react";
 import { Dialog } from "../components/Dialog";
 import { ContextMenu, type MenuItem } from "../components/ContextMenu";
+import { ScreenVolumeSlider } from "../components/ScreenVolume";
+import { VolumeNumber } from "../components/VolumeSlider";
 import {
   ControlBadge,
   HeaderToolsSlot,
@@ -31,6 +35,7 @@ import {
   type Rename,
 } from "./header-tools";
 import type { Controller } from "../room/controller";
+import { reducedMotion } from "../components/motion";
 import { participantStyle } from "../components/participant-style";
 import {
   HeaderAccessory,
@@ -39,7 +44,7 @@ import {
   type WidgetProps,
 } from "./widgets";
 import type { Box } from "./geometry";
-import type { Placement, WidgetInstance } from "./model";
+import { gridSize, type Placement, type WidgetInstance } from "./model";
 
 interface Props extends WidgetProps {
   box: Box;
@@ -113,6 +118,10 @@ export function WidgetFrame(props: Props) {
   const title = titleOf(widget, engine);
   const [tools, setTools] = useState<HTMLElement | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // Touch long press on the header opens the same menu (iOS has no contextmenu).
+  const press = useRef(0);
+  const pressAt = useRef({ x: 0, y: 0 });
+  const cancelPress = () => clearTimeout(press.current);
   const [rename, setRenameState] = useState<Rename>();
   const [bodyMenu, setBodyMenu] = useState<MenuSource>();
   const [renaming, setRenaming] = useState(false);
@@ -180,11 +189,7 @@ export function WidgetFrame(props: Props) {
       box.height < 1
     )
       return;
-    if (
-      element.current.ownerDocument.defaultView?.matchMedia(
-        "(prefers-reduced-motion: reduce)",
-      ).matches
-    )
+    if (reducedMotion(element.current.ownerDocument.defaultView || window))
       return;
     element.current.animate(
       [
@@ -215,10 +220,20 @@ export function WidgetFrame(props: Props) {
           ? 3
           : 2,
   } as CSSProperties;
+  // Room widget: − closes only for you, × for everyone (whoever may); a
+  // personal widget only closes (docs/design/cabecalho-widget.md).
   const removeLabel =
     widget.type === "screen"
       ? "Desconectar transmissão"
-      : "Remover deste layout";
+      : shared
+        ? "Fechar só para mim"
+        : "Fechar";
+  // A grid slot made of joined cells (#221).
+  const layout = engine.canvas.getSnapshot();
+  const joined =
+    !floating && gridSize(layout.preset)
+      ? layout.slots.find((t) => t.widgetId === widget.id && t.span)
+      : undefined;
   // Same order everywhere (docs/design/widgets-padrao.md): focus, rename,
   // widget actions and appearance, access, then remove and end.
   const menuItems: MenuItem[] = [
@@ -231,11 +246,29 @@ export function WidgetFrame(props: Props) {
             run: props.focus,
           },
         ]),
+    ...(widget.type === "screen" && !floating
+      ? [
+          {
+            label: "Janela flutuante",
+            icon: PictureInPicture2,
+            run: () => engine.canvas.detach(widget.id),
+          },
+        ]
+      : []),
     ...(rename
       ? [{ label: "Renomear", icon: Pencil, run: () => setRenaming(true) }]
       : []),
     ...(def?.menu?.(props) || []),
     ...(bodyMenu?.() || []),
+    ...(joined
+      ? [
+          {
+            label: "Separar espaços",
+            icon: LayoutGrid,
+            run: () => engine.canvas.resizeSlot(joined.id, 1, 1),
+          },
+        ]
+      : []),
     ...(choosesAccess
       ? [
           {
@@ -245,12 +278,17 @@ export function WidgetFrame(props: Props) {
           },
         ]
       : []),
-    { label: removeLabel, icon: X, separated: true, run: props.close },
+    {
+      label: removeLabel,
+      icon: shared ? Minus : X,
+      separated: true,
+      run: props.close,
+    },
     ...(endsForEveryone
       ? [
           {
-            label: "Encerrar para todos",
-            icon: Power,
+            label: "Fechar para todos",
+            icon: X,
             danger: true,
             run: props.end,
           },
@@ -289,6 +327,31 @@ export function WidgetFrame(props: Props) {
               ? { x: event.clientX, y: event.clientY }
               : { x: box.left + 12, y: box.bottom },
           );
+        }}
+        onPointerDown={(event) => {
+          if (
+            event.pointerType !== "touch" ||
+            (event.target as HTMLElement).closest(
+              "input, textarea, .widget-actions, .widget-tools",
+            )
+          )
+            return;
+          const at = { x: event.clientX, y: event.clientY };
+          pressAt.current = at;
+          press.current = window.setTimeout(() => setMenu(at), 500);
+        }}
+        onPointerUp={cancelPress}
+        onPointerCancel={cancelPress}
+        onPointerMove={(event) => {
+          // A finger never holds perfectly still; only a drag cancels.
+          if (
+            event.pointerType === "touch" &&
+            Math.hypot(
+              event.clientX - pressAt.current.x,
+              event.clientY - pressAt.current.y,
+            ) > 8
+          )
+            cancelPress();
         }}
       >
         {renaming ? (
@@ -360,18 +423,39 @@ export function WidgetFrame(props: Props) {
               <ArrowLeftRight size={16} />
             </button>
           )}
-          <button
-            className="icon-button"
-            onClick={props.close}
-            aria-label={
-              widget.type === "screen"
-                ? `Desconectar ${title}`
-                : `Remover ${title} deste layout`
-            }
-            title={removeLabel}
-          >
-            <X size={15} />
-          </button>
+          {shared ? (
+            <button
+              className="icon-button widget-close"
+              onClick={props.close}
+              aria-label={`Fechar ${title} só para mim`}
+              title={"Fechar só para mim\nContinua aberto para os outros."}
+            >
+              <Minus size={16} />
+            </button>
+          ) : (
+            <button
+              className="icon-button widget-close"
+              onClick={props.close}
+              aria-label={
+                widget.type === "screen"
+                  ? `Desconectar ${title}`
+                  : `Fechar ${title}`
+              }
+              title={removeLabel}
+            >
+              <X size={16} />
+            </button>
+          )}
+          {endsForEveryone && (
+            <button
+              className="icon-button widget-close widget-close-all"
+              onClick={props.end}
+              aria-label={`Fechar ${title} para todos`}
+              title="Fechar para todos"
+            >
+              <X size={16} />
+            </button>
+          )}
         </div>
       </header>
       <div
@@ -398,8 +482,34 @@ export function WidgetFrame(props: Props) {
           at={menu}
           items={menuItems}
           label={`Ações de ${title}`}
+          className="widget-menu"
           close={() => setMenu(null)}
           origin={element.current}
+          header={
+            widget.type === "screen" &&
+            person &&
+            person.publication.owner !== engine.view.id && (
+              <label className="person-menu-volume">
+                <span>
+                  Volume desta tela
+                  <VolumeNumber
+                    value={
+                      engine.screenLevel(widget.config.publicationId).volume
+                    }
+                    reset={() =>
+                      engine.setScreenLevel(widget.config.publicationId, {
+                        volume: 1,
+                      })
+                    }
+                  />
+                </span>
+                <ScreenVolumeSlider
+                  engine={engine}
+                  id={widget.config.publicationId}
+                />
+              </label>
+            )
+          }
         />
       )}
       {access && control && (

@@ -7,9 +7,78 @@ export interface Release {
   systemChange?: boolean;
   sections: { title: string; items: string[] }[];
 }
-export const version = "2.9.0";
+export const version = "2.11.0";
 export const currentRelease: Release = {
   version,
+  date: "2026-11-04",
+  title: "Pessoas, Minha transmissão, Câmeras e várias telas",
+  sections: [
+    {
+      title: "Telas e som",
+      items: [
+        "Compartilhar abre uma janela já com a imagem: Tela inteira, Janela ou Aba do navegador, qualidade até 1080p ou Fonte, 15 a 60 FPS, com ou sem som. As escolhas ficam lembradas.",
+        "Até 3 telas ao mesmo tempo, cada uma com Pausar, Silenciar, Trocar e Parar; quem assiste escolhe qual ver.",
+        "Som sem tela chega como som: um chip na barra da sala com o nome do programa, volume, Silenciar e Parar de ouvir.",
+        "Transmitir pesa menos: tela e câmera vão em H.264 quando o computador codifica por hardware.",
+      ],
+    },
+    {
+      title: "Widgets",
+      items: [
+        "Pessoas junta Pessoas na sala, Pessoas na chamada e o Mixer: bolhas com anel de fala, selos e o volume de cada voz, de 0 a 200%.",
+        "Minha transmissão junta Meus espectadores, Conexão e Minha tela: prévia ao vivo, controles, quem assiste e a conexão de cada pessoa.",
+        "Câmeras com quem fala em destaque; o botão direito fixa uma câmera.",
+        "Adicionar widget por abas (Assistir, Conversar, Decidir e jogar, Tempo e Comunidade), com busca em todas e Para mim ou Para a sala em cada widget. Personalizado virou Placar.",
+        "Quem não controla o Cronômetro da sala vê o estado no lugar dos botões.",
+      ],
+    },
+    {
+      title: "Sala",
+      items: [
+        "Grade: arraste a alça do canto para juntar espaços vizinhos. Foco único volta à barra da sala e devolve o layout como estava.",
+        "O criador continua criador quando o servidor reinicia, com admins e permissões.",
+        "O sino abre no clique, com Agora e Antes, Limpar e um ponto nas notificações não lidas.",
+        "No celular, segurar o cabeçalho de um widget abre o menu dele.",
+      ],
+    },
+    {
+      title: "App Windows",
+      items: [
+        "Tela e janela sem a borda amarela também no Windows 10, e o seletor carrega as miniaturas bem mais rápido.",
+        "Até 3 sons ao mesmo tempo, inclusive som sem tela; Só som lista os programas abertos de verdade, com ícone e nome.",
+        "Parar ou trocar uma transmissão com som não fecha mais o app.",
+      ],
+    },
+  ],
+};
+/** Expected next stable: what the 2.10.0 previews brought. */
+const stable2100Release: Release = {
+  version: "2.10.0",
+  date: null,
+  title: "Casca da interface",
+  sections: [
+    {
+      title: "Interface",
+      items: [
+        'Layout com dois modos, Grade e Foco + tira. Na Grade, escolha o tamanho numa matriz de até 3 linhas por 4 colunas (passe o mouse e clique, ou use as setas e Enter); Foco único virou a grade 1 × 1. Diminuir a grade não fecha nada: o que não cabe aparece em "N não exibidos", com Mostrar para cada um, e volta ao aumentar a grade. No celular, uma coluna: o foco fica fixo no topo em 16:9 e os outros rolam embaixo.',
+        'Avisos no topo da sala, um por vez, com barra de tempo e ×: quem entrou (4 s), quem saiu (4 s) e nova tela com Assistir (6 s). A nova tela entra por cima do aviso atual; os outros esperam com "+N". Passar o mouse pausa a barra. Erros da sala ficam até você fechar.',
+        'Adicionar widget com busca (sem acento: "cronometro" acha Cronômetro; Enter adiciona o primeiro, setas navegam), escolha Para mim / Para a sala no próprio painel e grupos Na sala, Decidir e jogar e Tempo. Em um espaço vazio, o catálogo abre dentro do espaço, com ícones que cabem nele; Esc ou clicar fora fecha.',
+        "Tempo da sala no topo, ao lado do código (passe o mouse para ver há quanto tempo está aberta), e o tempo de cada tela no cabeçalho dela, com o ponto ao vivo. Os dois vêm do relógio do servidor. O widget Tempo da sala saiu do catálogo; quem o tinha aberto fica com o espaço livre.",
+        "Volume das telas e das pessoas com o mesmo controle: marca em 100% e, acima disso, trecho e número dourados. Setas mudam 5%, Page Up/Down 25% e clique duplo no número volta a 100%. O botão direito na tela começa com Volume desta tela e ganhou Janela flutuante; em tela cheia, o botão Volume na barra abre o controle na vertical.",
+        "Ajustes reorganizados com busca no topo: Configurações (Áudio, Vídeo, Notificações, Aparência, Acessibilidade, Aplicativo) e Esta sala. Em Notificações, uma tabela liga ou desliga o balão e o som de cada tipo de aviso; tudo continua indo para o sino. Reduzir movimento pode seguir o sistema ou valer sempre.",
+        "Desativar áudio (o fone na doca) desliga seu microfone e as vozes, mas as telas continuam tocando. Ao reativar, o microfone volta como estava. Silenciar vozes e transmissões saiu dos Ajustes.",
+        'Cabeçalho do widget da sala com − (fecha só para você; continua aberto para os outros) e, para quem pode, × (fecha para todos). Fechar para todos não pede confirmação: o aviso no topo traz Desfazer por 8 s, que devolve o widget com o mesmo estado e no mesmo espaço; os outros recebem no sino quem fechou. Widget pessoal só tem ×. "N não exibidos" agora também lista os widgets da sala que você fechou ou que ainda não abriu, com o motivo em cada linha; sem espaço livre, Mostrar acende os espaços para você escolher qual substituir (Esc cancela).',
+        "A tira só reserva a faixa da barra de rolagem quando rola; sem rolagem, as margens ficam iguais dos dois lados.",
+        "Adicionar widget: em Para a sala só aparecem widgets que a sala compartilha. As telas transmitidas e a sua prévia aparecem no topo do catálogo, também no espaço vazio, para você colocar no espaço.",
+        "Ajustes: a linha Erros saiu de Notificações (não podia ser alterada) e Acessibilidade ganhou o ícone de pessoa de braços abertos.",
+        "App Windows: o som da janela agora funciona também no Windows 10 (versão 2004 ou mais recente). Na lista de áudio, a primeira opção é Todo o som do computador, sem o VIO: transmite tudo o que toca no PC, menos as vozes da chamada, para não haver eco.",
+        "Trocar o que transmito e silenciar o som da transmissão já funcionam por baixo: a nova fonte entra na mesma transmissão, sem derrubar quem assiste, e o silêncio vale para todos sem mexer no microfone. Os botões chegam com o widget Minha transmissão.",
+      ],
+    },
+  ],
+};
+const stable290Release: Release = {
+  version: "2.9.0",
   date: "2026-10-27",
   title: "Visual novo dos widgets, pessoas e notificações",
   sections: [
@@ -513,6 +582,8 @@ const systemRelease: Release = {
 };
 export const releases: Release[] = [
   currentRelease,
+  stable2100Release,
+  stable290Release,
   widgetsPreviewRelease,
   securityHotfixRelease,
   stableRelease,

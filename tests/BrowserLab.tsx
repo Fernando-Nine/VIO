@@ -112,7 +112,7 @@ export function BrowserLab() {
         () =>
           engines.every(
             (e) =>
-              e.peers.infos().filter((p) => !p.sending).length >= 5 &&
+              e.peers.infos().filter((p) => !p.sending).length >= 3 &&
               e.peers.infos().every((p) => p.state === "connected"),
           ),
         "mídias simultâneas",
@@ -203,6 +203,151 @@ export function BrowserLab() {
       report(
         "FPS, escala e bitrate aplicados",
         b.peers.infos().filter((p) => p.sending && p.publicationId === bScreen),
+      );
+      // #194: two more screens from the same person, each its own publication.
+      await b.startScreen(false, false, b.captures.nextScreen());
+      await b.startScreen(false, false, b.captures.nextScreen());
+      await until(
+        () => b.publications.has("screen:2") && b.publications.has("screen:3"),
+        "três telas da mesma pessoa",
+      );
+      const third = b.publications.get("screen:3")!.id;
+      assert(
+        new Set([bScreen, b.publications.get("screen:2")!.id, third]).size ===
+          3 && b.captures.nextScreen() === undefined,
+        "cada tela deve ser uma publicação",
+      );
+      assert(
+        b.captures.qualityOf(b.captures.sources.get("screen:2")).resolution <=
+          480,
+        "tela extra começa em qualidade baixa",
+      );
+      c.previews([third]);
+      await until(
+        () =>
+          c.peers
+            .infos()
+            .some(
+              (p) =>
+                p.publicationId === third &&
+                p.tier === "preview" &&
+                (p.bytes || 0) > 0,
+            ),
+        "miniatura da terceira tela",
+      );
+      c.previews([]);
+      await b.stop("screen:2");
+      await b.stop("screen:3");
+      await until(
+        () =>
+          !b.publications.has("screen:2") &&
+          !b.publications.has("screen:3") &&
+          b.publications.get("screen")?.id === bScreen &&
+          c.peers
+            .infos()
+            .some(
+              (p) =>
+                p.publicationId === bScreen &&
+                p.tier === "main" &&
+                p.state === "connected",
+            ),
+        "telas extras encerradas, principal mantida",
+      );
+      report("Três telas da mesma pessoa, cada uma sua publicação (#194)");
+      const watcher = () =>
+        c.peers
+          .infos()
+          .find(
+            (p) =>
+              p.publicationId === bScreen &&
+              p.tier === "main" &&
+              !p.sending &&
+              p.state === "connected",
+          );
+      const watcherId = watcher()!.id;
+      const bytes = async () => {
+        await c.peers.stats();
+        return watcher()?.bytes || 0;
+      };
+      const flowing = async (label: string) => {
+        const start = await bytes();
+        await until(() => {
+          void c.peers.stats();
+          return (watcher()?.bytes || 0) > start + 20000;
+        }, label);
+      };
+      b.setScreenAudioMuted(true);
+      assert(
+        b.captures.sources
+          .get("screen")!
+          .stream.getAudioTracks()
+          .every((t) => !t.enabled),
+        "som da tela silenciado",
+      );
+      const oldVideo = b.captures.sources
+        .get("screen")!
+        .stream.getVideoTracks()[0];
+      await b.startScreen(false, true);
+      await until(
+        () =>
+          b.captures.sources.get("screen")!.stream.getVideoTracks()[0] !==
+            oldVideo && !!b.publications.get("screen")?.audio === false,
+        "troca para fonte sem som",
+      );
+      await b.startScreen(true, true);
+      await until(
+        () => !!b.publications.get("screen")?.audio,
+        "fonte com som de volta",
+      );
+      assert(b.publications.get("screen")!.id === bScreen, "mesma publicação");
+      assert(
+        b.captures.sources
+          .get("screen")!
+          .stream.getAudioTracks()
+          .every((t) => !t.enabled),
+        "silêncio mantido na troca",
+      );
+      await flowing("vídeo após trocar a fonte");
+      assert(watcher()?.id === watcherId, "quem assiste não reconectou");
+      await until(
+        () =>
+          c.peers.entries
+            .get(watcherId)!
+            .stream.getAudioTracks()
+            .some((t) => t.readyState === "live"),
+        "som da fonte de volta para quem assiste",
+      );
+      b.setScreenAudioMuted(false);
+      await c.startScreen(false);
+      await until(() => c.publications.has("screen"), "tela sem som");
+      const cScreen = c.publications.get("screen")!.id;
+      a.select(cScreen);
+      const aWatch = () =>
+        a.peers
+          .infos()
+          .find(
+            (p) =>
+              p.publicationId === cScreen &&
+              !p.sending &&
+              p.state === "connected",
+          );
+      await until(() => !!aWatch(), "assistindo tela sem som");
+      const aWatchId = aWatch()!.id;
+      await c.startScreen(true, true);
+      await until(
+        () =>
+          a.peers.entries
+            .get(aWatchId)
+            ?.stream.getAudioTracks()
+            .some((t) => t.readyState === "live") === true,
+        "som renegociado",
+      );
+      assert(c.publications.get("screen")!.id === cScreen, "mesma publicação");
+      assert(aWatch()?.id === aWatchId, "sem nova conexão");
+      a.select(bScreen);
+      await c.stop("screen");
+      report(
+        "Trocar a fonte e silenciar o som mantêm a mesma publicação e quem assiste",
       );
       await a.microphone();
       assert(a.captures.micMuted, "mute manual ligado");

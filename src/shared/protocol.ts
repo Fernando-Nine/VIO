@@ -2,6 +2,8 @@ import { z } from "zod";
 import { widgetSchemas, type SharedWidget, type RoomNotice } from "./widgets";
 export const kinds = ["screen", "voice", "camera"] as const;
 export type Kind = (typeof kinds)[number];
+/** Screens one person may share at once (#194); the desktop app captures as many. */
+export const MAX_SCREENS = 3;
 export type Tier = "main" | "preview";
 export const uuid = z.string().uuid();
 export const participantColor = z
@@ -13,6 +15,9 @@ export const roomCode = z
   .trim()
   .toUpperCase()
   .regex(/^[A-Z0-9]{4,24}$/);
+/** Invite validity choices (#242). */
+export const inviteTtls = ["1h", "1d", "7d"] as const;
+export type InviteTtl = (typeof inviteTtls)[number];
 /** Room-wide permissions (Discord-like roles). The creator can do everything. */
 export const roomPermissions = z
   .object({
@@ -30,6 +35,12 @@ export const roomPermissions = z
     adminCreate: z.boolean(),
     /** Admins close widgets created by others. Creator only. */
     adminClose: z.boolean(),
+    /**
+     * Locked room (#242): only people who were already in it, holders of an
+     * invite and the creator's credential enter; the rest wait for approval.
+     * Optional so credentials signed before it still verify.
+     */
+    locked: z.boolean().optional(),
   })
   .strict();
 export type RoomPermissions = z.infer<typeof roomPermissions>;
@@ -68,8 +79,17 @@ export const schemas = {
         .regex(/^[^\p{Cc}\p{Cf}]+$/u),
       code: roomCode.optional(),
       color: participantColor.optional(),
+      /** Signed creator seat of this room, kept by the client (#226). */
+      credential: z.string().max(2048).optional(),
+      /** Signed invite of this room (#242). */
+      invite: z.string().max(512).optional(),
     })
     .strict(),
+  /** Admit or turn away someone in the waiting room (#242). */
+  admit: z.object({ id: uuid, allow: z.boolean() }).strict(),
+  "invite-create": z.object({ ttl: z.enum(inviteTtls) }).strict(),
+  /** Every invite issued so far stops working. */
+  "invite-revoke": z.object({}).strict(),
   role: z
     .object({
       participantId: uuid,
@@ -89,6 +109,15 @@ export const schemas = {
       key: uuid,
       audio: z.boolean(),
       muted: z.boolean(),
+      /** A screen slot carrying only a program's sound (#236), named by it. */
+      audioOnly: z.boolean().optional(),
+      label: z
+        .string()
+        .trim()
+        .min(1)
+        .max(60)
+        .regex(/^[^\p{Cc}\p{Cf}]+$/u)
+        .optional(),
     })
     .strict(),
   unpublish: z.object({ publicationId: z.string().max(80) }).strict(),
@@ -148,6 +177,10 @@ export interface Publication {
   key: string;
   audio: boolean;
   muted: boolean;
+  /** Sound without an image (#236): shown as a compact sound source. */
+  audioOnly?: boolean;
+  /** The program whose sound is shared; only with `audioOnly`. */
+  label?: string;
 }
 export interface Participant {
   id: string;
@@ -178,6 +211,33 @@ export interface Snapshot {
   screenViewers?: Record<string, string[]>;
   maxParticipants: null;
   recommendedParticipants: number;
+}
+/**
+ * Reply to `join`. `credential` goes only to the creator; the server also sends
+ * it later in a `room-credential` event (null = forget the stored one).
+ */
+export interface JoinResult {
+  id: string;
+  snapshot: Snapshot;
+  credential?: string;
+}
+/** Someone at the door of a locked room, as managers see them (#242). */
+export interface WaitingPerson {
+  /** Request id, not the person's id: they are not a member yet. */
+  id: string;
+  name: string;
+  color: string;
+  since: number;
+  expiresAt: number;
+}
+/** Sent to whoever waits: allowed = join again; otherwise the message says why. */
+export interface Admission {
+  allowed: boolean;
+  message?: string;
+}
+export interface InviteResult {
+  invite: string;
+  expiresAt: number;
 }
 export interface Subscription {
   id: string;

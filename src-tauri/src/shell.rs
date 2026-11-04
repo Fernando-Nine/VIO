@@ -1,8 +1,17 @@
 use crate::capture::{self, Manager, Source};
+use crate::log;
+use crate::stream::{Options, Started, StreamManager, Tick};
+use crate::video::{VideoManager, VideoSource};
 use serde::Serialize;
 use std::time::Duration;
 use tauri::{AppHandle, Manager as _, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
+use webview2_com::{
+    Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
+    },
+    ProcessFailedEventHandler,
+};
 
 // The window loads the interface bundled in the installer. Only that local origin
 // may call the capture commands; navigation never leaves it.
@@ -40,14 +49,26 @@ fn desktop_capabilities(window: WebviewWindow) -> Result<Capabilities, String> {
     Ok(Capabilities {
         protocol: 1,
         windows_build: build,
-        process_audio: build >= 22000,
+        process_audio: build >= capture::MIN_BUILD,
     })
 }
 
 #[tauri::command]
-fn desktop_sources(window: WebviewWindow, state: State<'_, Manager>) -> Result<Vec<Source>, String> {
+async fn desktop_sources(window: WebviewWindow, app: AppHandle) -> Result<Vec<Source>, String> {
     trusted(&window)?;
-    state.sources()
+    tauri::async_runtime::spawn_blocking(move || app.state::<Manager>().sources())
+        .await
+        .map_err(|_| "Não foi possível listar os programas.")?
+}
+
+#[tauri::command]
+async fn desktop_sound_icon(window: WebviewWindow, app: AppHandle, source_id: String) -> Result<tauri::ipc::Response, String> {
+    trusted(&window)?;
+    valid_id(&source_id)?;
+    let bytes = tauri::async_runtime::spawn_blocking(move || app.state::<Manager>().icon(&source_id))
+        .await
+        .map_err(|_| "Não foi possível ler o ícone.")??;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
@@ -84,6 +105,89 @@ fn desktop_stop_audio(window: WebviewWindow, state: State<'_, Manager>, capture_
     Ok(())
 }
 
+#[tauri::command]
+fn desktop_video_sources(window: WebviewWindow, state: State<'_, VideoManager>) -> Result<Vec<VideoSource>, String> {
+    trusted(&window)?;
+    state.sources()
+}
+
+#[tauri::command]
+async fn desktop_video_thumbnail(
+    window: WebviewWindow,
+    app: AppHandle,
+    source_id: String,
+) -> Result<tauri::ipc::Response, String> {
+    trusted(&window)?;
+    valid_id(&source_id)?;
+    let bytes = tauri::async_runtime::spawn_blocking(move || app.state::<VideoManager>().thumbnail(&source_id))
+        .await
+        .map_err(|_| "Não foi possível gerar a miniatura.")??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+async fn desktop_video_start(
+    window: WebviewWindow,
+    source_id: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    cursor: bool,
+) -> Result<Started, String> {
+    trusted(&window)?;
+    valid_id(&source_id)?;
+    let options = Options { width, height, fps, cursor };
+    tauri::async_runtime::spawn_blocking(move || {
+        window.state::<StreamManager>().start(&window, &source_id, options)
+    })
+    .await
+    .map_err(|_| "Não foi possível iniciar a captura da imagem.")?
+}
+
+#[tauri::command]
+async fn desktop_video_wait(
+    window: WebviewWindow,
+    state: State<'_, StreamManager>,
+    capture_id: String,
+    after: u32,
+) -> Result<Tick, String> {
+    trusted(&window)?;
+    valid_id(&capture_id)?;
+    let stream = state.stream(&capture_id)?;
+    tauri::async_runtime::spawn_blocking(move || stream.wait(after))
+        .await
+        .map_err(|_| "A captura da imagem parou.")?
+}
+
+#[tauri::command]
+async fn desktop_video_stop(window: WebviewWindow, capture_id: String) -> Result<(), String> {
+    trusted(&window)?;
+    valid_id(&capture_id)?;
+    let app = window.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || app.state::<StreamManager>().stop(&app, Some(&capture_id)))
+        .await
+        .map_err(|_| "Não foi possível encerrar a captura.")?;
+    Ok(())
+}
+
+/// Audio source matching a native video source: its application, or the whole PC.
+#[tauri::command]
+fn desktop_share_audio(
+    window: WebviewWindow,
+    audio: State<'_, Manager>,
+    video: State<'_, VideoManager>,
+    source_id: String,
+    system: bool,
+) -> Result<Source, String> {
+    trusted(&window)?;
+    valid_id(&source_id)?;
+    if system {
+        audio.link(None)
+    } else {
+        audio.link(Some(video.audio_target(&source_id)?))
+    }
+}
+
 async fn update(app: &AppHandle) -> tauri_plugin_updater::Result<()> {
     let mut builder = app.updater_builder().timeout(Duration::from_secs(20));
     // VIO Teste follows whatever its feed points at, even a lower prerelease number.
@@ -100,28 +204,63 @@ async fn update(app: &AppHandle) -> tauri_plugin_updater::Result<()> {
 }
 
 fn open(app: &AppHandle) -> tauri::Result<()> {
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title(app.package_info().name.clone())
         .inner_size(1280.0, 800.0)
         .min_inner_size(720.0, 480.0)
         .use_https_scheme(true)
         .on_navigation(local)
         .build()?;
+    window.with_webview(|webview| {
+        let _ = watch_page(&webview);
+    })?;
     Ok(())
+}
+
+/// A crashed page is logged and reloaded instead of leaving a blank window (#246).
+fn watch_page(webview: &tauri::webview::PlatformWebview) -> windows::core::Result<()> {
+    let core = unsafe { webview.controller().CoreWebView2() }?;
+    let handler = ProcessFailedEventHandler::create(Box::new(|sender, args| {
+        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+        if let Some(args) = args {
+            unsafe { args.ProcessFailedKind(&mut kind) }?;
+        }
+        log::write("webview", &format!("process failed, kind {}", kind.0));
+        if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED {
+            if let Some(sender) = sender {
+                unsafe { sender.Reload() }?;
+            }
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    unsafe { core.add_ProcessFailed(&handler, &mut token) }
 }
 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Manager::default())
+        .manage(VideoManager::default())
+        .manage(StreamManager::default())
         .invoke_handler(tauri::generate_handler![
             desktop_capabilities,
             desktop_sources,
+            desktop_sound_icon,
             desktop_start_audio,
             desktop_read_audio,
-            desktop_stop_audio
+            desktop_stop_audio,
+            desktop_video_sources,
+            desktop_video_thumbnail,
+            desktop_video_start,
+            desktop_video_wait,
+            desktop_video_stop,
+            desktop_share_audio
         ])
         .setup(|app| {
+            if let Ok(dir) = app.path().app_log_dir() {
+                log::init(dir, &app.package_info().version.to_string());
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 // Update only before the room opens: installing must never end a call.
@@ -136,6 +275,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed | tauri::WindowEvent::CloseRequested { .. }) {
                 window.state::<Manager>().stop(None);
+                window.state::<StreamManager>().stop(window.app_handle(), None);
             }
         })
         .run(tauri::generate_context!())

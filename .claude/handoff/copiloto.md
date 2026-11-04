@@ -1,20 +1,24 @@
 # Copiloto — handoff
 
-Atualizado: 2026-10-26 (tarde)
+Atualizado: 2026-10-28
 
 ## Agora
 
-Sessões ativas (tag `vio-team`; criar com `create_session`, source VIO_TEST):
+Copiloto: `session_01K4nnLTF5gUKwkjx99XxmGX`. Sessões abertas (tag `vio-team`):
 
-- QA/Release `session_01GoaQuuAx1QX9U3Xsnr2eUx` — sem acesso ao VIO; releases de produção ficam com o copiloto.
-- Frontend/UX (6) `session_01NJ7XxUbzaNDrKKwRi5QQ9U` — fila: #115, #81. (5) concluiu #107, #109, #122, #123.
-- Backend: sem sessão ativa (último arquivado após #122/PR #126); abrir nova quando houver tarefa.
-- Frontend (6): #138/#139 presas no `installer` (senha da chave vazia) → PR #140 assina só ao publicar. Depois #141–#145.
-- Design (leva 3) `session_01KPbZqEyhHpE8D8ik96V4Uh` — #146–#150.
-- Mídia (2) `session_01Q7SGieUDumQL8PUpbo7nEM` — fila concluída; ociosa até #148 sair do Design.
-- Tarefa agendada `trig_01Y6stnQYUT7NzutBNEgUzmK` (3 h) retoma agentes parados por limite.
+- Design brandbook `session_01K4nnLQc9rnHwwaU5Jshvv4` — canvas "VIO · Marca", issue #227.
+- Encerradas em 28 out: Frontend 12 (#191, #221, #228, #222), Frontend 13 (#236), Mídia 6
+  (#194, #229), Backend (#226), Roteirista (ideias, PR #230), Design leva 4.
+- **2.11.0 pronta na prévia (rc.15)**, aguarda aval. Aceite humano no app: miniaturas do seletor,
+  nome do programa em "Só som", CPU 1080p60. Com o aval: release no VIO (ver Próximo passo).
+- Aguardam o usuário: ideias de sala (recomendado trancar + convite, depois grupo de bolso) e
+  narrativa da landing (#197; Roteirista recomenda C "O ponto", depende do logo).
+- Jurídico: primeira tarefa sugerida = parecer de clips (#208) e base de termos/política.
 
 ## Feito recentemente
+
+- **2.9.0 em produção** (VIO PR #4 = VIO_TEST bbb5c23); registro estável 2.9.0 já no `releases.ts`. Tag `v2.9.0` criada pelo usuário.
+- #83 fechada (zod 4 e `npm audit` na CI já estavam feitos).
 
 - Produção 2.8.1 (VIO PR #3, hotfix body-parser/zod). Prévia 2.9.0-rc.x com widgets novos.
 - Skills de terceiros + próprias em `.claude/skills/` (PR #121); papéis dizem quais usar.
@@ -22,6 +26,9 @@ Sessões ativas (tag `vio-team`; criar com `create_session`, source VIO_TEST):
 
 ## Decisões
 
+- **Copiloto conversa antes de mandar fazer** (usuário, 28 out): ideias visuais novas (transições,
+  telas, mudanças de interação) primeiro são discutidas e aprovadas com o usuário; só depois viram
+  pedido a uma área. Bugs e pedidos explícitos do usuário seguem direto.
 - Segurança vai direto para produção (hotfix PATCH sobre a produção), sem aval.
 - Widgets: pessoais ou da sala; sem compartilhar (#104).
 - Silenciar: "para mim" todos; "para todos" só o dono (#122).
@@ -33,20 +40,17 @@ Sessões ativas (tag `vio-team`; criar com `create_session`, source VIO_TEST):
 
 ## Pendente / bloqueios
 
-- App Windows com WASAPI (#120) pronto para teste: usuário precisa pôr `ALLOWED_APP_ORIGINS=https://tauri.localhost`
-  no Render da prévia (Environment → Add Environment Variable; nome digitado à mão, funciona no Free).
+- App Windows com WASAPI (#120) pronto para teste; `ALLOWED_APP_ORIGINS` já está nos dois Render.
 - Hospedagem: ficar no Render (Vercel não serve: sem servidor WebSocket persistente). Ao abrir ao
   público, produção no plano Starter (~US$ 7/mês) para não dormir. Alternativas: Fly.io, Railway.
 - TURN (#135, futuro): conferir ExpressTURN e avaliar Cloudflare Realtime/coturn.
-- Copiloto novo deve ser aberto pelo usuário (sessão filha não tem create_session/send_message).
 
 - Usuário cadastrar a chave privada do updater como secret (ele avisa).
-- Tags v2.7.2, v2.8.0, v2.8.1 no VIO: rede dos agentes recusa push de tag; usuário pode
-  criar em Releases (commits c249a34, 8993afb, 246aea1).
+- Tags v2.7.2, v2.8.0, v2.8.1: não criar (decisão antiga). Próximas tags o usuário cria em Releases.
 - Grid celular e pauta futura de Design (landing/página de download).
 
 ## Próximo passo
 
-Roadmap em `docs/ROADMAP.md`. 2.9.0 = rc.13 + #115/#81 + bugs #141–#145; então pedir aval e publicar.
-Para publicar no VIO: árvore idêntica ao commit aprovado do VIO_TEST (git checkout <sha> -- .),
-PR no VIO, squash, conferir rodapé com o usuário.
+Com o aval da 2.11.0: subir a versão estável em `releases.ts` + `package.json` no VIO_TEST, depois
+árvore idêntica ao commit aprovado (`git checkout <sha> -- .`) num branch do VIO, PR, squash; tag
+`v2.11.0` pelo usuário em Releases. Depois, transformar as ideias escolhidas em issues.

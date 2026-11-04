@@ -219,6 +219,114 @@ test("três sessões, nomes iguais, publicações simultâneas e assinatura sele
     await app.close();
   }
 });
+test("até três telas por pessoa, cada uma sua publicação; a quarta é recusada", async () => {
+  const app = await server();
+  const sockets: Socket[] = [];
+  try {
+    for (let i = 0; i < 2; i++)
+      sockets.push(await connect(app.url, (await session(app.url)).token));
+    for (const [i, s] of sockets.entries())
+      data(await request(s, "join", { name: `P${i}`, code: "QATELAS" }));
+    const share = (key: string, s = sockets[0]) =>
+      request<Publication>(s, "publish", {
+        kind: "screen",
+        key,
+        audio: false,
+        muted: false,
+      });
+    const keys = [0, 1, 2].map(() => crypto.randomUUID());
+    const screens = [];
+    for (const key of keys) screens.push(data(await share(key)));
+    assert.equal(new Set(screens.map((p) => p.id)).size, 3);
+    // Same key updates in place, even at the limit.
+    assert.equal(data(await share(keys[1])).id, screens[1].id);
+    const fourth = await share(crypto.randomUUID());
+    assert.equal(fourth.ok, false);
+    if (!fourth.ok) assert.equal(fourth.code, "SCREEN_LIMIT");
+    const sub = data(
+      await request<Subscription>(sockets[1], "subscribe", {
+        publicationId: screens[2].id,
+        tier: "main",
+        nonce: crypto.randomUUID(),
+      }),
+    );
+    assert.equal(sub.publication.id, screens[2].id);
+    data(
+      await request(sockets[0], "unpublish", { publicationId: screens[0].id }),
+    );
+    const room = app.rooms.rooms.get("QATELAS")!;
+    const owner = [...room.members.values()].find((m) => m.name === "P0")!;
+    assert.deepEqual(
+      owner.publications.map((p) => p.id),
+      [screens[1].id, screens[2].id],
+    );
+    assert.equal(room.subscriptions.has(sub.id), true);
+    data(await share(crypto.randomUUID()));
+    // Voice still replaces itself.
+    const voice = (key: string) =>
+      request<Publication>(sockets[0], "publish", {
+        kind: "voice",
+        key,
+        audio: true,
+        muted: false,
+      });
+    data(await request(sockets[0], "call", { active: true }));
+    data(await voice(crypto.randomUUID()));
+    data(await voice(crypto.randomUUID()));
+    assert.equal(
+      owner.publications.filter((p) => p.kind === "voice").length,
+      1,
+    );
+  } finally {
+    sockets.forEach((s) => s.disconnect());
+    await app.close();
+  }
+});
+test("só som é uma tela com som, marcada e nomeada; o resto é recusado", async () => {
+  const app = await server();
+  const sockets: Socket[] = [];
+  try {
+    for (let i = 0; i < 2; i++)
+      sockets.push(await connect(app.url, (await session(app.url)).token));
+    for (const [i, s] of sockets.entries())
+      data(await request(s, "join", { name: `P${i}`, code: "QASOM" }));
+    const key = crypto.randomUUID();
+    const publish = (extra: Record<string, unknown>) =>
+      request<Publication>(sockets[0], "publish", {
+        kind: "screen",
+        key,
+        audio: true,
+        muted: false,
+        ...extra,
+      });
+    const sound = data(await publish({ audioOnly: true, label: "Spotify" }));
+    assert.equal(sound.audioOnly, true);
+    assert.equal(sound.label, "Spotify");
+    const owner = [...app.rooms.rooms.get("QASOM")!.members.values()].find(
+      (m) => m.id === sound.owner,
+    )!;
+    const seen = owner.publications.find((p) => p.id === sound.id)!;
+    assert.equal(seen.label, "Spotify");
+    for (const bad of [
+      { audioOnly: true, audio: false },
+      { audioOnly: true, kind: "camera" },
+      { label: "Spotify" },
+      { audioOnly: true, label: "x".repeat(61) },
+      { audioOnly: true, label: "Spo\u0000tify" },
+    ]) {
+      const reply = await publish(bad);
+      assert.equal(reply.ok, false, JSON.stringify(bad));
+    }
+    // The same key turning into a normal screen drops the mark.
+    const screen = data(await publish({}));
+    assert.equal(screen.id, sound.id);
+    assert.equal(screen.audioOnly, undefined);
+    assert.equal(screen.label, undefined);
+  } finally {
+    sockets.forEach((s) => s.disconnect());
+    await app.close();
+  }
+});
 test("isolamento entre salas, falsa identidade e ação de terceiros são recusados", async () => {
   const app = await server();
   const a = await connect(app.url, (await session(app.url)).token);
@@ -1421,11 +1529,16 @@ test("compartilhar é idempotente e somente criador encerra a instância para to
     data(await request(owner, "widget-create", { id, content }));
     assert.equal(app.rooms.rooms.get("QACLOSE")!.widgets.entries.size, 1);
     assert.equal((await request(member, "widget-delete", { id })).ok, false);
-    const closed = new Promise<{ id: string; widget: null }>((resolve) =>
-      member.once("widget-updated", resolve),
-    );
+    const closed = new Promise<{
+      id: string;
+      widget: null;
+      closed?: { byName: string };
+    }>((resolve) => member.once("widget-updated", resolve));
     data(await request(owner, "widget-delete", { id }));
-    assert.deepEqual(await closed, { id, widget: null });
+    const event = await closed;
+    assert.equal(event.id, id);
+    assert.equal(event.widget, null);
+    assert.equal(event.closed?.byName, "Criador");
     assert.equal(app.rooms.rooms.get("QACLOSE")!.widgets.entries.size, 0);
   } finally {
     owner.disconnect();
@@ -2535,6 +2648,71 @@ test("silenciar para todos: só o dono, encerra a voz e bloqueia até liberar", 
     data(await block(owner, false));
     assert.equal(target.voiceBlocked, undefined);
     data(await publish("voice"));
+  } finally {
+    sockets.forEach((s) => s.disconnect());
+    await app.close();
+  }
+});
+
+test("câmera segue a demanda de cada espectador (#162); voz não tem demanda", async () => {
+  const app = await server();
+  const sockets: Socket[] = [];
+  try {
+    for (let i = 0; i < 2; i++) {
+      const socket = await connect(app.url, (await session(app.url)).token);
+      sockets.push(socket);
+      data(
+        await request(socket, "join", {
+          name: `Pessoa ${i}`,
+          code: "QACAMDEMAND",
+        }),
+      );
+    }
+    const [owner, viewer] = sockets;
+    const subscribe = async (kind: "camera" | "voice") => {
+      const publication = data(
+        await request<Publication>(owner, "publish", {
+          kind,
+          key: crypto.randomUUID(),
+          audio: kind === "voice",
+          muted: false,
+        }),
+      );
+      return data(
+        await request<Subscription>(viewer, "subscribe", {
+          publicationId: publication.id,
+          tier: "main",
+          nonce: crypto.randomUUID(),
+        }),
+      );
+    };
+    const camera = await subscribe("camera");
+    const received = new Promise<{ id: string; video: string }>((resolve) =>
+      owner.once("video-demand", resolve),
+    );
+    data(
+      await request(viewer, "demand", {
+        id: camera.id,
+        video: "small",
+        height: 240,
+      }),
+    );
+    assert.deepEqual(await received, {
+      id: camera.id,
+      video: "small",
+      height: 240,
+    });
+    const voice = await subscribe("voice");
+    assert.equal(
+      (
+        await request(viewer, "demand", {
+          id: voice.id,
+          video: "off",
+          height: 240,
+        })
+      ).ok,
+      false,
+    );
   } finally {
     sockets.forEach((s) => s.disconnect());
     await app.close();

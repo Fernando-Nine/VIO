@@ -1,4 +1,5 @@
 import { canvasShortcuts, snapPressed } from "./shortcuts";
+import type { Slot as CaptureSlot } from "../media/capture";
 import {
   useCallback,
   useEffect,
@@ -7,6 +8,7 @@ import {
   useState,
   useSyncExternalStore,
   type CSSProperties,
+  type ReactNode,
   type KeyboardEvent,
 } from "react";
 import {
@@ -29,27 +31,24 @@ import {
   Blocks,
   Columns3,
   LayoutGrid,
+  Focus,
   Maximize,
   Minimize,
   MonitorUp,
   Plus,
   SlidersHorizontal,
-  User,
-  Users,
   X,
 } from "lucide-react";
 import { Notifications } from "../components/Notifications";
-import {
-  LiveScreens,
-  ScreenToast,
-  type ScreenEvent,
-} from "../components/LiveScreens";
+import { LiveScreens, type ScreenEvent } from "../components/LiveScreens";
 import { canManageRoom, roleAllows, roomRole } from "../../shared/permissions";
 import type { SharedWidget } from "../../shared/widgets";
-import { contentKind } from "../../shared/widgets";
+import { closedWidgetHold, contentKind } from "../../shared/widgets";
 import { Dialog } from "../components/Dialog";
 import { ScreenAudio } from "../components/ScreenAudio";
+import { SoundSources, soundName } from "../components/SoundSources";
 import type { Controller } from "../room/controller";
+import { reducedMotion } from "../components/motion";
 import { freshKey } from "../id";
 import {
   fitted,
@@ -57,9 +56,11 @@ import {
   canRemoveSlot,
   isStrip,
   slotUnits,
-  presetNames,
+  autoGrid,
+  gridPreset,
+  gridSize,
+  gridPlacement,
   type Offer,
-  type Preset,
   type Slot,
   type WidgetInstance,
 } from "./model";
@@ -67,15 +68,37 @@ import { floatingBox, useCanvasGeometry } from "./geometry";
 import { wheelTarget } from "./strip-wheel";
 import { useStripInput, stripStops } from "./strip-input";
 import { WidgetFrame } from "./WidgetFrame";
+import { WidgetCatalog, type Scope } from "./WidgetCatalog";
+import { GridPicker } from "./GridPicker";
+import {
+  EdgeBands,
+  FocusGhost,
+  FocusThumb,
+  SpanHandle,
+  edgeAt,
+  sideLabel,
+  sidePhrase,
+  sides,
+  type GridFrame,
+  type Side,
+} from "./GridTools";
+import type { CellRect } from "./slot-spans";
+import { NotShown, type NotShownEntry } from "./NotShown";
+import { loadClosed, saveClosed } from "./closed-widgets";
+import { toasts } from "../components/Toasts";
 import { adjacentDropSlot, dropSlotAt, type Point } from "./drag";
 import { createWidget, titleOf, widgetRegistry } from "./widgets";
+import { pinCamera } from "./CamerasWidget";
 import { createModule } from "./ModuleWidget";
 import { createContent } from "./CustomWidget";
+import { roomContentKind } from "./room-content";
 import { isModule } from "../../shared/room-modules";
 
 // dnd-kit starts a mouse drag on the handle at pointerdown, so a plain click
 // (or double click to rename) would already detach the widget. Require a
-// small movement first; touch and other pointers keep the library defaults.
+// small movement first. Touch too: holding still is the long press that
+// opens the widget menu (#209); the handle has touch-action none, so moving
+// never scrolls. Other pointers keep the library defaults.
 const sensors = (
   defaults: Parameters<
     NonNullable<
@@ -87,6 +110,8 @@ const sensors = (
     activationConstraints: (event, source) => {
       if (event.pointerType === "mouse")
         return [new PointerActivationConstraints.Distance({ value: 4 })];
+      if (event.pointerType === "touch")
+        return [new PointerActivationConstraints.Distance({ value: 8 })];
       const fallback = PointerSensor.defaults.activationConstraints;
       return typeof fallback === "function"
         ? fallback(event, source)
@@ -133,6 +158,7 @@ interface Props {
   people: () => void;
   diagnostics: () => void;
   share: () => void;
+  replaceShare: (slot: CaptureSlot) => void;
   fullscreen: () => void;
   isFullscreen?: boolean;
 }
@@ -142,6 +168,7 @@ function CanvasSlot({
   index,
   register,
   add,
+  catalog,
   accept,
   decline,
   remove,
@@ -152,11 +179,13 @@ function CanvasSlot({
   dragging,
   split,
   reorderTarget,
+  area,
 }: {
   slot: Slot;
   index: number;
   register: (id: string, node: HTMLElement | null) => void;
   add: () => void;
+  catalog?: ReactNode;
   accept: (id: string, destination: "slot" | "float") => void;
   decline: (id: string) => void;
   remove: () => void;
@@ -168,6 +197,8 @@ function CanvasSlot({
   split: () => void;
   /** A strip widget dragged along the strip lands here. */
   reorderTarget: boolean;
+  /** Grid cells this slot covers (#221); the strip stacks spans instead. */
+  area?: CellRect;
 }) {
   const { ref, isDropTarget } = useDroppable({
     id: slot.id,
@@ -186,10 +217,16 @@ function CanvasSlot({
       className={`canvas-slot ${isDropTarget && !disabled ? "is-drop-target" : ""} ${reorderTarget ? "is-reorder-target" : ""}`}
       data-slot-id={slot.id}
       data-span={slotUnits(slot)}
-      style={{ "--slot-span": slotUnits(slot) } as CSSProperties}
+      style={
+        (area
+          ? {
+              gridArea: `${area.row + 1} / ${area.column + 1} / span ${area.rows} / span ${area.columns}`,
+            }
+          : { "--slot-span": slotUnits(slot) }) as CSSProperties
+      }
       aria-label={`Espaço ${index + 1}`}
     >
-      {Array.from({ length: slotUnits(slot) }, (_, i) => (
+      {Array.from({ length: area ? 1 : slotUnits(slot) }, (_, i) => (
         <i
           key={i}
           className="slot-snap-point"
@@ -235,7 +272,8 @@ function CanvasSlot({
           </button>
         </div>
       ) : (
-        !slot.widgetId && (
+        !slot.widgetId &&
+        (catalog || (
           <>
             <button className="add-widget" onClick={add}>
               <Plus size={20} />
@@ -255,7 +293,7 @@ function CanvasSlot({
               </button>
             )}
           </>
-        )
+        ))
       )}
     </div>
   );
@@ -267,9 +305,13 @@ export function RoomCanvas(props: Props) {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const { geometry, root, strip, register, measure } = useCanvasGeometry(state);
   const [catalog, setCatalog] = useState<string | null>(null);
-  const [catalogTab, setCatalogTab] = useState("native");
-  const [communityNotice, setCommunityNotice] = useState(false);
-  const [scopeChoice, setScopeChoice] = useState<string | null>(null);
+  // The catalog inside an empty slot (the panel uses `catalog`).
+  const [slotCatalog, setSlotCatalog] = useState<string | null>(null);
+  const target = slotCatalog ?? catalog;
+  const closeCatalog = () => {
+    setCatalog(null);
+    setSlotCatalog(null);
+  };
   const [layoutOpen, setLayoutOpen] = useState(false);
   const [drag, setDrag] = useState<{ id: string; x: number; y: number } | null>(
     null,
@@ -282,14 +324,32 @@ export function RoomCanvas(props: Props) {
   const [announcement, announce] = useState("");
   const [roving, setRoving] = useState<string | null>(null);
   const [snap, setSnap] = useState(false);
+  // #221: slot under the pointer (span handle), Shift edge and focus preview.
+  const [hoverSlot, setHoverSlot] = useState<string | null>(null);
+  const [spanning, setSpanning] = useState(false);
+  const [edge, setEdge] = useState<Side | null>(null);
+  const edgeRef = useRef<Side | null>(null);
+  const [preview, setPreview] = useState<Side | null>(null);
   const [stripTarget, setStripTarget] = useState<string | null>(null);
   const shift = useRef(false);
   const keyboardDrag = useRef(false);
   const [nearTop, setNearTop] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [screenEvents, setScreenEvents] = useState<ScreenEvent[]>([]);
-  const [toast, setToast] = useState<string | null>(null);
-  const hideToast = useCallback(() => setToast(null), []);
+  // Room widgets you closed with − and closes by others for the bell (#158).
+  const [closedIds, setClosedIds] = useState(loadClosed);
+  const [closeEvents, setCloseEvents] = useState<
+    { id: string; text: string; at: number }[]
+  >([]);
+  // Where each widget closed for everyone was, so Undo puts it back there.
+  const restoreSpots = useRef(
+    new Map<string, { slotId?: string; until: number }>(),
+  );
+  // "Mostrar" with no free cell: the cells light up to pick one; Esc cancels.
+  const [picking, setPicking] = useState<{
+    name: string;
+    place: (slotId: string) => void;
+  } | null>(null);
   const [fullscreenIntro, setFullscreenIntro] = useState(false);
   const [highlightedSlot, setHighlightedSlot] = useState<string | null>(null);
   const pendingFocus = useRef<string | null>(null);
@@ -397,13 +457,24 @@ export function RoomCanvas(props: Props) {
           id: pub.id,
           title: p.name,
           own: p.id === engine.view.id,
+          // Sound without an image (#236): listened to, never a tile.
+          sound: pub.audioOnly ? soundName(pub.label) : undefined,
         })),
     ) || [];
-  const publicationsKey = publications.map((p) => p.id).join("|");
+  const publicationsKey = publications
+    .map((p) => `${p.id}:${p.sound ?? ""}`)
+    .join("|");
+  const screenList = publications
+    .filter((p) => !p.sound)
+    .map((p) => ({
+      id: p.id,
+      name: p.title,
+      own: p.own,
+      watching: engine.view.watching.includes(p.id),
+    }));
   const liveScreens = publications
     .filter((p) => !p.own)
     .map((p) => ({ ...p, watching: engine.view.watching.includes(p.id) }));
-  const toastEvent = screenEvents.find((e) => e.id === toast);
   const epoch = useRef(snapshot?.epoch);
 
   function focusHeader(id: string) {
@@ -449,6 +520,127 @@ export function RoomCanvas(props: Props) {
       `Transmissão aceita. ${destination === "float" ? "Janela flutuante aberta." : "Conectando no espaço escolhido."}`,
     );
   }
+  useEffect(() => () => toasts.clear(), []);
+  useEffect(() => {
+    engine.widgetClosed = (widget, closed) => {
+      const instance = store
+        .getSnapshot()
+        .widgets.find((w) => w.config.sharedId === widget.id);
+      const slotId = instance
+        ? store.getSnapshot().slots.find((s) => s.widgetId === instance.id)?.id
+        : undefined;
+      if (instance)
+        restoreSpots.current.set(widget.id, {
+          slotId,
+          until: Date.now() + closedWidgetHold + 2000,
+        });
+      if (closed.by !== engine.view.id) {
+        setCloseEvents((events) =>
+          [
+            ...events,
+            {
+              id: freshKey(),
+              text: `${closed.byName} fechou o ${widget.title}.`,
+              at: Date.now(),
+            },
+          ].slice(-30),
+        );
+        return;
+      }
+      const toast = `closed:${widget.id}`;
+      toasts.push({
+        id: toast,
+        kind: "important",
+        label: `Você fechou o ${widget.title} para todos`,
+        text: (
+          <>
+            Você fechou o <strong>{widget.title}</strong> para todos.
+          </>
+        ),
+        duration: closedWidgetHold,
+        action: {
+          label: "Desfazer",
+          run: () => {
+            toasts.close(toast, false);
+            engine
+              .request("widget-restore", { id: widget.id })
+              .catch((e) => engine.fail(e));
+          },
+        },
+      });
+    };
+    return () => {
+      engine.widgetClosed = undefined;
+    };
+  });
+  // Undo brings the widget back to the cell it had, for everyone who had it.
+  useEffect(() => {
+    const now = Date.now();
+    for (const [id, spot] of restoreSpots.current) {
+      const widget = snapshot?.widgets?.find((w) => w.id === id);
+      if (!widget && spot.until > now) continue;
+      restoreSpots.current.delete(id);
+      if (!widget) continue;
+      const state = store.getSnapshot();
+      if (state.widgets.some((w) => w.config.sharedId === id)) continue;
+      const free = state.slots.find(
+        (s) => s.id === spot.slotId && !s.widgetId && !s.offer,
+      );
+      const instance = sharedInstance(widget);
+      if (free) store.add(instance, free.id);
+      else
+        store.change((s) => {
+          s.widgets.push(instance);
+          s.hidden.push(instance.id);
+        });
+    }
+  }, [snapshot?.widgets, store]);
+  const screenToasts = useRef(new Map<string, string>());
+  // Who entered or left since the last snapshot; the first one only primes.
+  const people = useRef<Map<string, string> | null>(null);
+  const peopleKey = snapshot?.participants
+    .map((p) => `${p.id}:${p.name}`)
+    .join("|");
+  useEffect(() => {
+    const now = new Map(
+      snapshot?.participants
+        .filter((p) => p.id !== engine.view.id)
+        .map((p) => [p.id, p.name]) || [],
+    );
+    const before = people.current;
+    people.current = snapshot ? now : null;
+    if (!before) return;
+    for (const [id, name] of now)
+      if (!before.has(id))
+        if (engine.balloons.people)
+          toasts.push({
+            id: `enter:${id}:${Date.now()}`,
+            kind: "info",
+            avatar: name,
+            label: `${name} entrou na sala`,
+            text: (
+              <>
+                <strong>{name}</strong> entrou na sala.
+              </>
+            ),
+            duration: 4000,
+          });
+    for (const [id, name] of before)
+      if (!now.has(id))
+        if (engine.balloons.people)
+          toasts.push({
+            id: `leave:${id}:${Date.now()}`,
+            kind: "info",
+            avatar: name,
+            label: `${name} saiu`,
+            text: (
+              <>
+                <strong>{name}</strong> saiu.
+              </>
+            ),
+            duration: 4000,
+          });
+  }, [peopleKey, engine]);
   useEffect(() => {
     // A fresh room (or epoch) only primes what is already live: those
     // screens are in the live icon, not news to announce.
@@ -458,14 +650,19 @@ export function RoomCanvas(props: Props) {
       epoch.current = snapshot?.epoch;
     }
     const current = store.getSnapshot();
+    const sounds = new Set(
+      publications.filter((p) => p.sound).map((p) => p.id),
+    );
     for (const widget of current.widgets) {
       if (
         widget.type === "screen" &&
-        !engine.view.watching.includes(widget.config.publicationId)
+        (!engine.view.watching.includes(widget.config.publicationId) ||
+          sounds.has(widget.config.publicationId))
       )
         store.remove(widget.id);
     }
     for (const id of engine.view.watching) {
+      if (sounds.has(id)) continue;
       if (!store.getSnapshot().widgets.some((w) => w.id === `screen:${id}`)) {
         store.decline(id);
         store.add(screenWidget(id));
@@ -487,12 +684,50 @@ export function RoomCanvas(props: Props) {
           name: publication.title,
           at: Date.now(),
           read: false,
+          sound: publication.sound,
         };
         setScreenEvents((events) => [...events, event].slice(-30));
-        setToast(event.id);
+        if (!engine.balloons.screens) continue;
+        screenToasts.current.set(publication.id, `screen:${event.id}`);
+        toasts.push({
+          id: `screen:${event.id}`,
+          kind: "important",
+          avatar: event.name,
+          label: publication.sound
+            ? `${event.name} começou a transmitir o som de ${publication.sound}`
+            : `${event.name} começou a transmitir`,
+          text: publication.sound ? (
+            <>
+              <strong>{event.name}</strong> começou a transmitir o som de{" "}
+              {publication.sound}.
+            </>
+          ) : (
+            <>
+              <strong>{event.name}</strong> começou a transmitir.
+            </>
+          ),
+          duration: 6000,
+          action: {
+            label: publication.sound ? "Ouvir" : "Assistir",
+            run: () => {
+              setScreenEvents((events) =>
+                events.map((e) =>
+                  e.id === event.id ? { ...e, read: true } : e,
+                ),
+              );
+              showPublication(event.publicationId);
+            },
+          },
+        });
       }
     }
     const live = new Set(publications.map((p) => p.id));
+    // "Assistir" on a screen that already ended would do nothing.
+    for (const [id, toast] of screenToasts.current)
+      if (!live.has(id) || engine.view.watching.includes(id)) {
+        toasts.close(toast, false);
+        screenToasts.current.delete(id);
+      }
     const latest = store.getSnapshot();
     for (const item of [
       ...latest.pending,
@@ -548,32 +783,61 @@ export function RoomCanvas(props: Props) {
       engine.watchRequest = undefined;
     };
   });
+  useEffect(() => {
+    engine.cameraRequest = (personId) => {
+      const existing = store
+        .getSnapshot()
+        .widgets.find((w) => w.type === "cameras");
+      const widget = existing || createWidget("cameras");
+      if (!existing) {
+        widget.config = { pinned: personId };
+        const free =
+          store.getSnapshot().slots.find((s) => !s.widgetId && !s.offer)?.id ||
+          store.addSlot();
+        store.add(widget, free);
+      } else {
+        pinCamera(engine, widget.id, personId);
+        store.show(widget.id);
+      }
+      focusHeader(widget.id);
+    };
+    return () => {
+      engine.cameraRequest = undefined;
+    };
+  });
+  function sharedInstance(widget: SharedWidget): WidgetInstance {
+    return {
+      id: freshKey(),
+      type: contentKind(widget),
+      title: widget.title,
+      config: { sharedId: widget.id },
+      transient: true,
+    };
+  }
+  function reopen(sharedId: string) {
+    if (!closedIds.includes(sharedId)) return;
+    const next = closedIds.filter((id) => id !== sharedId);
+    setClosedIds(next);
+    saveClosed(next);
+  }
   function openShared(widget: SharedWidget, bringToFocus = false) {
     const state = store.getSnapshot();
     const existing = state.widgets.find((w) => w.config.sharedId === widget.id);
+    reopen(widget.id);
     if (existing) {
       focus(existing.id);
       return;
     }
-    const id = freshKey();
     const destination =
-      state.slots.find((s) => s.id === catalog && !s.widgetId && !s.offer)
-        ?.id ||
+      state.slots.find((s) => s.id === target && !s.widgetId && !s.offer)?.id ||
       state.slots.find((s) => !s.widgetId && !s.offer)?.id ||
       store.addSlot();
-    store.add(
-      {
-        id,
-        type: contentKind(widget),
-        title: widget.title,
-        config: { sharedId: widget.id },
-        transient: true,
-      },
-      destination,
-    );
+    const instance = sharedInstance(widget);
+    const id = instance.id;
+    store.add(instance, destination);
     if (bringToFocus) focus(id);
     focusHeader(id);
-    setCatalog(null);
+    closeCatalog();
   }
   // "Para a sala" only for whoever the room lets create (#104).
   const createsForRoom =
@@ -585,21 +849,18 @@ export function RoomCanvas(props: Props) {
         ? "adminCreate"
         : "guestCreate",
     );
-  async function addWidget(type: string, scope?: "room" | "individual") {
-    const scoped = isModule(type) || type === "timer";
-    if (scoped && !scope && createsForRoom) {
-      setScopeChoice(type);
-      return;
-    }
-    if (type === "chat" || (scoped && scope === "room")) {
+  async function addWidget(type: string, scope: Scope) {
+    const kind = roomContentKind(type, scope);
+    if (kind) {
       try {
         const widget = await engine.request<SharedWidget>("widget-create", {
           id: freshKey(),
-          content: isModule(type)
-            ? createModule(type)
-            : type === "timer"
-              ? createContent("timer")
-              : { kind: "chat", title: "Chat", blocks: [] },
+          content:
+            kind === "module" && isModule(type)
+              ? createModule(type)
+              : kind === "chat"
+                ? { kind: "chat", title: "Chat", blocks: [] }
+                : createContent(kind),
         });
         engine.receiveSharedWidget(widget);
         openShared(widget);
@@ -614,40 +875,121 @@ export function RoomCanvas(props: Props) {
       store.getSnapshot().widgets.find((w) => w.type === type);
     if (existing) {
       focus(existing.id);
-      setCatalog(null);
+      closeCatalog();
       return;
     }
     const widget = createWidget(type);
     const destination =
       store
         .getSnapshot()
-        .slots.find((s) => s.id === catalog && !s.widgetId && !s.offer)?.id ||
+        .slots.find((s) => s.id === target && !s.widgetId && !s.offer)?.id ||
       store.getSnapshot().slots.find((s) => !s.widgetId && !s.offer)?.id ||
       store.addSlot();
     store.add(widget, destination);
-    setCatalog(null);
+    closeCatalog();
     focusHeader(widget.id);
     announce(`${widget.title} adicionado ao seu layout.`);
   }
+  const hasFreeSlot = () => {
+    const current = store.getSnapshot();
+    return (
+      isStrip(current) || current.slots.some((t) => !t.widgetId && !t.offer)
+    );
+  };
+  /** First free cell; with none, the cells light up to pick one. */
+  function reveal(
+    name: string,
+    direct: () => void,
+    place: (id: string) => void,
+  ) {
+    if (hasFreeSlot()) {
+      direct();
+      return;
+    }
+    store.change((s) => {
+      s.single = false;
+    });
+    setPicking({ name, place });
+    announce(`Escolha o espaço para ${name}. Esc cancela.`);
+  }
+  const notShown: (NotShownEntry & { direct: () => void })[] = [
+    ...state.hidden.flatMap((id) => {
+      const widget = state.widgets.find((w) => w.id === id);
+      if (!widget) return [];
+      const name = titleOf(widget, engine);
+      const direct = () => store.show(id);
+      return [
+        {
+          id,
+          name,
+          icon: widgetRegistry[widget.type]?.icon,
+          reason: "Sem espaço na grade",
+          direct,
+          show: () => reveal(name, direct, (slotId) => store.move(id, slotId)),
+        },
+      ];
+    }),
+    ...(snapshot?.widgets || [])
+      .filter((w) => !state.widgets.some((i) => i.config.sharedId === w.id))
+      .map((widget) => {
+        const owner = snapshot?.participants.find((p) => p.id === widget.owner);
+        const direct = () => openShared(widget);
+        return {
+          id: widget.id,
+          name: widget.title,
+          icon: widgetRegistry[contentKind(widget)]?.icon,
+          reason: closedIds.includes(widget.id)
+            ? "Você fechou"
+            : widget.owner === engine.view.id
+              ? "Criado por você"
+              : owner
+                ? `Novo, de ${owner.name}`
+                : "Novo",
+          direct,
+          show: () =>
+            reveal(widget.title, direct, (slotId) => {
+              reopen(widget.id);
+              const instance = sharedInstance(widget);
+              store.replace(instance, slotId);
+              focusHeader(instance.id);
+            }),
+        };
+      }),
+  ];
+  useEffect(() => {
+    if (!picking) return;
+    const key = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setPicking(null);
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [picking]);
   function showPublication(id: string) {
+    if (engine.screenInfo(id)?.publication.audioOnly) {
+      engine.watch(id, true, true);
+      closeCatalog();
+      return;
+    }
     const existing = store
       .getSnapshot()
       .widgets.find((w) => w.id === `screen:${id}`);
     if (existing) focus(existing.id);
     else {
       store.decline(id);
-      const target = store
+      const free = store
         .getSnapshot()
-        .slots.find((s) => s.id === catalog && !s.widgetId && !s.offer);
-      if (target) {
-        store.add(screenWidget(id), target.id);
+        .slots.find((s) => s.id === target && !s.widgetId && !s.offer);
+      if (free) {
+        store.add(screenWidget(id), free.id);
         engine.watch(id, true, true);
-      } else if (catalog === "floating") {
+      } else if (target === "floating") {
         store.add(screenWidget(id), undefined, true);
         engine.watch(id, true, true);
       } else engine.watch(id, true);
     }
-    setCatalog(null);
+    closeCatalog();
   }
   async function remove(widget: WidgetInstance, forEveryone = false) {
     const slotId = store
@@ -670,12 +1012,20 @@ export function RoomCanvas(props: Props) {
     }
     if (widget.type === "screen")
       engine.stopWatching(widget.config.publicationId);
+    const sharedId = widget.config.sharedId;
+    if (sharedId && !endedForEveryone && !closedIds.includes(sharedId)) {
+      const next = [...closedIds, sharedId];
+      setClosedIds(next);
+      saveClosed(next);
+    }
     store.remove(widget.id);
     if (slotId) setHighlightedSlot(slotId);
     announce(
       endedForEveryone
-        ? `${titleOf(widget, engine)} encerrado para todos na sala.`
-        : `${titleOf(widget, engine)} removido do seu layout.`,
+        ? `${titleOf(widget, engine)} fechado para todos.`
+        : sharedId
+          ? `${titleOf(widget, engine)} fechado só para você.`
+          : `${titleOf(widget, engine)} fechado.`,
     );
   }
   function scrollStep(direction: number) {
@@ -695,9 +1045,7 @@ export function RoomCanvas(props: Props) {
     );
     el.scrollTo({
       [horizontal ? "left" : "top"]: target,
-      behavior: el.ownerDocument.defaultView?.matchMedia(
-        "(prefers-reduced-motion: reduce)",
-      ).matches
+      behavior: reducedMotion(el.ownerDocument.defaultView || window)
         ? "instant"
         : "smooth",
     });
@@ -741,7 +1089,7 @@ export function RoomCanvas(props: Props) {
   }
   useEffect(() => {
     const id = pendingFocus.current;
-    if (!id || catalog || layoutOpen) return;
+    if (!id || target || layoutOpen) return;
     const host = [
       ...(root.current?.querySelectorAll<HTMLElement>("[data-widget-id]") ||
         []),
@@ -752,15 +1100,24 @@ export function RoomCanvas(props: Props) {
         ?.focus({ preventScroll: true });
       pendingFocus.current = null;
     }
-  }, [geometry, roving, root, catalog, layoutOpen]);
+  }, [geometry, roving, root, target, layoutOpen]);
   const slotProps = (slot: Slot, index: number) => ({
     slot,
     index,
     register,
-    add: () => {
-      setCatalog(slot.id);
-      setCatalogTab("native");
-    },
+    add: () => setSlotCatalog(slot.id),
+    catalog:
+      slotCatalog === slot.id ? (
+        <WidgetCatalog
+          compact
+          canRoom={createsForRoom}
+          chatAllowed={canManageRoom(snapshot, engine.view.id)}
+          add={(type, scope) => void addWidget(type, scope)}
+          close={() => setSlotCatalog(null)}
+          screens={screenList}
+          showScreen={showPublication}
+        />
+      ) : undefined,
     accept,
     decline: (id: string) => store.decline(id),
     remove: () => store.removeSlot(slot.id),
@@ -771,6 +1128,7 @@ export function RoomCanvas(props: Props) {
     dragging: !!drag && !keyboardDrag.current,
     split: () => store.splitSlot(slot.id),
     reorderTarget: stripTarget === slot.id,
+    area: placement?.get(slot.id),
   });
   useLayoutEffect(() => {
     if (!highlightedSlot) return;
@@ -783,8 +1141,84 @@ export function RoomCanvas(props: Props) {
       ?.focus({ preventScroll: true });
     setHighlightedSlot(null);
   }, [highlightedSlot, state.slots, root]);
-  const visibleSlots =
-    geometry.bounds.width < 380 ? 1 : geometry.bounds.width < 680 ? 2 : 3;
+  // Phones use one column: the focus on top in 16:9, the rest below.
+  const compact = geometry.bounds.width < 680;
+  const horizontalStrip =
+    !compact && ["strip-top", "strip-bottom"].includes(state.preset);
+  const grid = gridSize(state.preset);
+  // Phones stack the grid in one column, so cells keep no position there.
+  const placement =
+    grid && !compact
+      ? gridPlacement(state.slots, grid.rows, grid.columns)
+      : null;
+  const frame: GridFrame | null = (() => {
+    if (!grid || !placement) return null;
+    const boxes = state.slots.flatMap((t) => geometry.slots.get(t.id) ?? []);
+    if (boxes.length !== state.slots.length) return null;
+    const x = Math.min(...boxes.map((b) => b.x)),
+      y = Math.min(...boxes.map((b) => b.y));
+    return {
+      area: {
+        x,
+        y,
+        width: Math.max(...boxes.map((b) => b.x + b.width)) - x,
+        height: Math.max(...boxes.map((b) => b.y + b.height)) - y,
+      },
+      ...grid,
+      // Same as --canvas-gap (workspace.css).
+      gap: 8,
+    };
+  })();
+  const spanOrigin =
+    frame && hoverSlot && !state.single && !drag
+      ? placement?.get(hoverSlot)
+      : undefined;
+  const toLocal = (point: Point) => {
+    const base = root.current?.getBoundingClientRect();
+    return base ? { x: point.x - base.left, y: point.y - base.top } : point;
+  };
+  /** Docked slot under a point, for the span handle; floating widgets have their own resizer. */
+  function slotUnder(event: {
+    clientX: number;
+    clientY: number;
+    target: EventTarget;
+  }) {
+    if (
+      !frame ||
+      (event.target as HTMLElement).closest?.(".widget-host.is-floating")
+    )
+      return null;
+    const local = toLocal({ x: event.clientX, y: event.clientY });
+    return (
+      state.slots.find((t) => {
+        const box = geometry.slots.get(t.id);
+        return (
+          box &&
+          local.x >= box.x &&
+          local.x <= box.x + box.width &&
+          local.y >= box.y &&
+          local.y <= box.y + box.height
+        );
+      })?.id ?? null
+    );
+  }
+  // Switching to the grid picks the smallest one that shows everything.
+  const gridToFit = autoGrid(
+    state.slots.filter((t) => t.widgetId || t.offer).length +
+      state.hidden.length,
+  );
+  const visibleSlots = compact
+    ? Math.max(
+        1,
+        Math.floor(
+          (geometry.bounds.height - (geometry.bounds.width * 9) / 16) /
+            ((geometry.bounds.width * 9) / 16),
+        ),
+      )
+    : 3;
+  // Only a strip that scrolls reserves the scrollbar lane (#189).
+  const stripScrolls =
+    state.slots.slice(1).reduce((n, s) => n + slotUnits(s), 0) > visibleSlots;
   const dropSlots = state.slots.flatMap((slot) => {
     const box = geometry.slots.get(slot.id);
     return box?.visible && !slot.offer ? [{ ...box, id: slot.id }] : [];
@@ -809,7 +1243,8 @@ export function RoomCanvas(props: Props) {
     <div
       className={`room-canvas ${props.isFullscreen ? "is-fullscreen" : ""} ${nearTop || fullscreenIntro || notificationsOpen ? "show-top-toolbar" : ""}`}
       onPointerMove={(event) => {
-        if (event.pointerType === "mouse")
+        // A drag toward the top edge must not open the toolbar (#221).
+        if (event.pointerType === "mouse" && !drag)
           setNearTop(
             event.clientY - event.currentTarget.getBoundingClientRect().top <=
               4 || !!(event.target as HTMLElement).closest(".canvas-toolbar"),
@@ -871,31 +1306,48 @@ export function RoomCanvas(props: Props) {
             store.change((s) => {
               s.single = false;
             });
+            setSlotCatalog(null);
             setCatalog(
               state.slots.find((s) => !s.widgetId && !s.offer)?.id ?? "new",
             );
-            setCatalogTab("native");
           }}
         >
           <Plus size={16} />
           <span>Widget</span>
         </button>
+        {notShown.length > 0 && (
+          <NotShown
+            entries={notShown}
+            showAll={() => {
+              for (const entry of notShown) if (hasFreeSlot()) entry.direct();
+            }}
+          />
+        )}
+        {/* #228: one click fills the canvas with the focus; the layout is untouched. */}
         <button
-          className="text-button"
+          className="text-button single-toggle"
           aria-pressed={state.single}
-          disabled={!state.widgets.length}
+          disabled={!state.single && !focusedWidgetId(state)}
+          title={
+            !state.single && !focusedWidgetId(state)
+              ? "Abra um widget para usar o Foco único."
+              : undefined
+          }
           onClick={() => store.toggleSingle()}
         >
-          <Columns3 size={16} />
+          {state.single ? <Columns3 size={16} /> : <Focus size={16} />}
           <span>{state.single ? "Voltar ao conjunto" : "Foco único"}</span>
         </button>
         <Notifications
           engine={engine}
           openWidget={(w) => openShared(w, true)}
           openScreen={showPublication}
-          screenEvents={screenEvents.filter((e) => e.id !== toast)}
+          screenEvents={screenEvents}
+          closeEvents={closeEvents}
+          closedIds={closedIds}
           onOpenChange={setNotificationsOpen}
         />
+        <SoundSources engine={engine} />
         <LiveScreens screens={liveScreens} watch={showPublication} />
         <button
           className="icon-button canvas-fullscreen"
@@ -959,6 +1411,15 @@ export function RoomCanvas(props: Props) {
             manager.actions.move({ to: point, propagate: false });
           }
           origin.point = point;
+          const nextEdge =
+            shift.current && !keyboardDrag.current && !state.single
+              ? edgeAt(
+                  { x: point.x - base.left, y: point.y - base.top },
+                  geometry.bounds,
+                )
+              : null;
+          edgeRef.current = nextEdge;
+          setEdge(nextEdge);
           setStripTarget(
             keyboardDrag.current || shift.current
               ? null
@@ -996,7 +1457,12 @@ export function RoomCanvas(props: Props) {
               shift.current || keyboardDrag.current
                 ? undefined
                 : stripDrop(id, point);
-            if (along !== undefined) {
+            const side = shift.current ? edgeRef.current : null;
+            if (side && !state.single) {
+              store.preset(`strip-${side}`);
+              store.focus(id);
+              announce(`Foco + tira: ${sidePhrase[side]}.`);
+            } else if (along !== undefined) {
               if (along) {
                 store.reorder(id, along);
                 announce("Widget movido na tira.");
@@ -1035,6 +1501,8 @@ export function RoomCanvas(props: Props) {
             }
           }
           dragOrigin.current = null;
+          edgeRef.current = null;
+          setEdge(null);
           setStripTarget(null);
           keyboardDrag.current = false;
           shift.current = false;
@@ -1044,35 +1512,41 @@ export function RoomCanvas(props: Props) {
         }}
       >
         <div
-          className={`canvas-viewport ${drag ? "canvas-dragging" : ""} ${snap || keyboardDrag.current ? "snap-enabled" : ""}`}
+          className={`canvas-viewport ${drag ? "canvas-dragging" : ""} ${snap || keyboardDrag.current ? "snap-enabled" : ""} ${edge ? "edge-armed" : ""}`}
           ref={root}
+          onPointerMove={(event) => {
+            if (event.pointerType === "mouse" && !spanning)
+              setHoverSlot(slotUnder(event));
+          }}
+          onPointerDown={(event) => {
+            if (event.pointerType !== "mouse" && !spanning)
+              setHoverSlot(slotUnder(event));
+          }}
+          onPointerLeave={(event) => {
+            if (event.pointerType === "mouse" && !spanning) setHoverSlot(null);
+          }}
+          onFocus={(event) => {
+            const target = event.target as HTMLElement;
+            if (target.closest(".span-handle")) return;
+            const widgetId =
+              target.closest<HTMLElement>("[data-widget-id]")?.dataset.widgetId;
+            const slotId =
+              state.slots.find((t) => widgetId && t.widgetId === widgetId)
+                ?.id ??
+              target.closest<HTMLElement>("[data-slot-id]")?.dataset.slotId;
+            if (slotId) setHoverSlot(slotId);
+          }}
         >
           <div
-            className={`canvas-layout ${state.preset} ${state.single ? "single-focus" : ""}`}
+            className={`canvas-layout ${grid ? "grid" : state.preset} ${state.single ? "single-focus" : ""}`}
+            onScroll={compact && grid ? measure : undefined}
             style={
               {
                 "--focus-ratio": `${state.ratio * 100}%`,
                 "--strip-visible": visibleSlots,
-                "--grid-count": state.slots.length,
-                "--auto-columns": Math.min(
-                  state.slots.length,
-                  geometry.bounds.width < 680
-                    ? 2
-                    : state.preset === "grid-4" || state.preset === "grid-2"
-                      ? 2
-                      : 3,
-                ),
-                "--grid-rows": Math.ceil(
-                  state.slots.length /
-                    Math.min(
-                      state.slots.length,
-                      geometry.bounds.width < 680
-                        ? 2
-                        : state.preset === "grid-4" || state.preset === "grid-2"
-                          ? 2
-                          : 3,
-                    ),
-                ),
+                "--grid-rows": grid?.rows ?? 1,
+                "--grid-columns": grid?.columns ?? 1,
+                "--compact-row": `${Math.round(((geometry.bounds.width - 8) * 9) / 16)}px`,
               } as CSSProperties
             }
           >
@@ -1083,7 +1557,7 @@ export function RoomCanvas(props: Props) {
                   {...slotProps(state.slots[0], 0)}
                 />
                 <div
-                  className="canvas-strip"
+                  className={`canvas-strip ${stripScrolls ? "is-scrollable" : ""}`}
                   ref={strip}
                   onScroll={measure}
                   aria-label="Tira de widgets"
@@ -1099,6 +1573,37 @@ export function RoomCanvas(props: Props) {
               ))
             )}
           </div>
+          {frame && spanOrigin && hoverSlot && (
+            <SpanHandle
+              key={`${hoverSlot}:${spanOrigin.rows}x${spanOrigin.columns}`}
+              frame={frame}
+              origin={spanOrigin}
+              toLocal={toLocal}
+              busy={(active) => {
+                setSpanning(active);
+                props.interaction(active);
+              }}
+              apply={(rows, columns) => {
+                store.resizeSlot(hoverSlot, rows, columns);
+                announce(
+                  rows * columns > 1
+                    ? `Espaços juntados: ${rows} × ${columns}.`
+                    : "Espaços separados.",
+                );
+              }}
+            />
+          )}
+          {drag && snap && !keyboardDrag.current && !state.single && (
+            <EdgeBands active={edge} />
+          )}
+          {drag && snap && edge && (
+            <FocusGhost
+              box={geometry.bounds}
+              side={edge}
+              ratio={state.ratio}
+              label={`${canvasShortcuts.snap.label} · soltar: ${sidePhrase[edge]}`}
+            />
+          )}
           {stripMode && !state.single && (
             <div className="slot-junctions" aria-label="Mesclar espaços vazios">
               {state.slots.slice(1, -1).map((slot, i) => {
@@ -1119,9 +1624,7 @@ export function RoomCanvas(props: Props) {
                   slotUnits(slot) + slotUnits(next) > Math.min(3, visibleSlots)
                 )
                   return null;
-                const horizontal =
-                  geometry.bounds.width < 680 ||
-                  ["strip-top", "strip-bottom"].includes(state.preset);
+                const horizontal = horizontalStrip;
                 if (
                   horizontal
                     ? a.x < area.x - 2 ||
@@ -1152,47 +1655,42 @@ export function RoomCanvas(props: Props) {
               })}
             </div>
           )}
-          {stripMode &&
-            !state.single &&
-            state.slots.slice(1).reduce((n, s) => n + slotUnits(s), 0) >
-              visibleSlots && (
-              <div
-                className={`strip-controls ${geometry.bounds.width < 680 || ["strip-top", "strip-bottom"].includes(state.preset) ? "is-horizontal" : "is-vertical"}`}
-                role="group"
-                aria-label="Navegar pela tira"
-                style={{
-                  top: geometry.strip?.y || 8,
-                  height: geometry.strip?.height || "auto",
-                  left: geometry.strip?.x || 8,
-                  width: geometry.strip?.width || "auto",
-                }}
+          {stripMode && !state.single && stripScrolls && (
+            <div
+              className={`strip-controls ${horizontalStrip ? "is-horizontal" : "is-vertical"}`}
+              role="group"
+              aria-label="Navegar pela tira"
+              style={{
+                top: geometry.strip?.y || 8,
+                height: geometry.strip?.height || "auto",
+                left: geometry.strip?.x || 8,
+                width: geometry.strip?.width || "auto",
+              }}
+            >
+              <button
+                className="icon-button"
+                onClick={() => scrollStep(-1)}
+                aria-label="Voltar um item da tira"
               >
-                <button
-                  className="icon-button"
-                  onClick={() => scrollStep(-1)}
-                  aria-label="Voltar um item da tira"
-                >
-                  {geometry.bounds.width < 680 ||
-                  ["strip-top", "strip-bottom"].includes(state.preset) ? (
-                    <ArrowLeft size={16} />
-                  ) : (
-                    <ArrowUp size={16} />
-                  )}
-                </button>
-                <button
-                  className="icon-button"
-                  onClick={() => scrollStep(1)}
-                  aria-label="Avançar um item da tira"
-                >
-                  {geometry.bounds.width < 680 ||
-                  ["strip-top", "strip-bottom"].includes(state.preset) ? (
-                    <ArrowRight size={16} />
-                  ) : (
-                    <ArrowDown size={16} />
-                  )}
-                </button>
-              </div>
-            )}
+                {horizontalStrip ? (
+                  <ArrowLeft size={16} />
+                ) : (
+                  <ArrowUp size={16} />
+                )}
+              </button>
+              <button
+                className="icon-button"
+                onClick={() => scrollStep(1)}
+                aria-label="Avançar um item da tira"
+              >
+                {horizontalStrip ? (
+                  <ArrowRight size={16} />
+                ) : (
+                  <ArrowDown size={16} />
+                )}
+              </button>
+            </div>
+          )}
           {state.widgets.map((widget) => {
             const slot = state.slots.find((s) => s.widgetId === widget.id),
               floating = state.floating.find((f) => f.widgetId === widget.id);
@@ -1237,8 +1735,7 @@ export function RoomCanvas(props: Props) {
                   !!slot &&
                   slot !== state.slots[0] &&
                   !state.single
-                    ? geometry.bounds.width < 680 ||
-                      ["strip-top", "strip-bottom"].includes(state.preset)
+                    ? horizontalStrip
                       ? "x"
                       : "y"
                     : undefined
@@ -1255,6 +1752,53 @@ export function RoomCanvas(props: Props) {
               />
             );
           })}
+          {picking && (
+            <div
+              className="slot-picker"
+              role="group"
+              aria-label={`Escolha o espaço para ${picking.name}`}
+            >
+              {state.slots.map((slot, index) => {
+                const box = geometry.slots.get(slot.id);
+                if (!box?.visible) return null;
+                const current = state.widgets.find(
+                  (w) => w.id === slot.widgetId,
+                );
+                return (
+                  <button
+                    key={slot.id}
+                    className="slot-pick"
+                    autoFocus={index === 0}
+                    style={{
+                      left: box.x,
+                      top: box.y,
+                      width: box.width,
+                      height: box.height,
+                    }}
+                    onClick={() => {
+                      setPicking(null);
+                      picking.place(slot.id);
+                    }}
+                  >
+                    <span>
+                      {current
+                        ? `Substituir ${titleOf(current, engine)}`
+                        : "Colocar aqui"}
+                    </span>
+                  </button>
+                );
+              })}
+              <div className="slot-picker-hint" role="status">
+                <span>Escolha o espaço para {picking.name}</span>
+                <button
+                  className="text-button"
+                  onClick={() => setPicking(null)}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </DragDropProvider>
       <div className="canvas-audio">
@@ -1269,7 +1813,7 @@ export function RoomCanvas(props: Props) {
               stream={engine.peers.stream(id)}
               name={info.name}
               volume={level.volume}
-              muted={level.muted || engine.captures.deaf || engine.remoteMute}
+              muted={level.muted}
             />
           );
         })}
@@ -1277,21 +1821,6 @@ export function RoomCanvas(props: Props) {
       <span className="sr-only" role="status" aria-live="polite">
         {announcement}
       </span>
-      {toastEvent && (
-        <ScreenToast
-          event={toastEvent}
-          done={hideToast}
-          watch={() => {
-            setScreenEvents((events) =>
-              events.map((e) =>
-                e.id === toastEvent.id ? { ...e, read: true } : e,
-              ),
-            );
-            setToast(null);
-            showPublication(toastEvent.publicationId);
-          }}
-        />
-      )}
       {offer && (
         <Dialog
           title="Todos os espaços estão ocupados"
@@ -1328,254 +1857,195 @@ export function RoomCanvas(props: Props) {
         </Dialog>
       )}
       {layoutOpen && (
-        <Dialog title="Organizar seu espaço" close={() => setLayoutOpen(false)}>
-          <fieldset className="layout-modes">
-            <legend>Modo layout</legend>
-            <div className="layout-choices">
-              <button
-                className="layout-choice"
-                aria-pressed={!stripMode}
-                onClick={() =>
-                  store.preset(
-                    `grid-${Math.min(6, state.slots.length)}` as Preset,
-                  )
+        <Dialog
+          title="Organizar seu espaço"
+          className={preview ? "is-previewing" : undefined}
+          close={() => {
+            setPreview(null);
+            setLayoutOpen(false);
+          }}
+        >
+          {compact ? (
+            <label className="layout-switch">
+              <span>
+                <strong>Foco no topo</strong>
+                <span>Um widget fixo em cima; os outros rolam embaixo.</span>
+              </span>
+              <input
+                type="checkbox"
+                role="switch"
+                checked={stripMode}
+                onChange={(e) =>
+                  store.preset(e.target.checked ? "strip-left" : gridToFit)
                 }
-              >
-                <LayoutGrid />
-                <strong>Grid automático</strong>
-                <span>Todos os espaços fazem parte da grade.</span>
-              </button>
-              <button
-                className="layout-choice"
-                aria-pressed={stripMode}
-                onClick={() => store.preset("strip-left")}
-              >
-                <Columns3 />
-                <strong>Foco + tira</strong>
-                <span>Um espaço grande e uma tira linear.</span>
-              </button>
-            </div>
-          </fieldset>
-          <fieldset className="layout-details">
-            <legend>{stripMode ? "Posição do foco" : "Disposição"}</legend>
-            {stripMode ? (
-              <div
-                className="layout-directions"
-                role="group"
-                aria-label="Posição do foco"
-              >
-                {(["left", "right", "top", "bottom"] as const).map(
-                  (side, i) => (
-                    <button
-                      key={side}
-                      aria-pressed={state.preset === `strip-${side}`}
-                      onClick={() => store.preset(`strip-${side}`)}
+              />
+            </label>
+          ) : (
+            <>
+              <fieldset className="layout-modes">
+                <legend>Modo</legend>
+                <div className="layout-choices">
+                  <button
+                    className="layout-choice"
+                    aria-pressed={!stripMode}
+                    onClick={() => !grid && store.preset(gridToFit)}
+                  >
+                    <LayoutGrid />
+                    <strong>Grade</strong>
+                    <span>Todos do mesmo tamanho.</span>
+                  </button>
+                  <button
+                    className="layout-choice"
+                    aria-pressed={stripMode}
+                    onClick={() => !stripMode && store.preset("strip-left")}
+                  >
+                    <Columns3 />
+                    <strong>Foco + tira</strong>
+                    <span>Um grande e uma fileira.</span>
+                  </button>
+                </div>
+              </fieldset>
+              <fieldset className="layout-details">
+                <legend>{stripMode ? "Posição do foco" : "Tamanho"}</legend>
+                {stripMode ? (
+                  <>
+                    <div
+                      className="layout-directions"
+                      role="group"
+                      aria-label="Posição do foco"
                     >
-                      {["Esquerda", "Direita", "Em cima", "Embaixo"][i]}
-                    </button>
-                  ),
+                      {sides.map((side) => (
+                        <button
+                          key={side}
+                          aria-pressed={state.preset === `strip-${side}`}
+                          onClick={() => store.preset(`strip-${side}`)}
+                          onPointerEnter={() => setPreview(side)}
+                          onPointerLeave={() => setPreview(null)}
+                          onFocus={() => setPreview(side)}
+                          onBlur={() => setPreview(null)}
+                        >
+                          <FocusThumb side={side} />
+                          {sideLabel[side]}
+                        </button>
+                      ))}
+                    </div>
+                    {preview && root.current && (
+                      <FocusGhost
+                        fixed
+                        box={(() => {
+                          const r = root.current.getBoundingClientRect();
+                          return {
+                            x: r.left,
+                            y: r.top,
+                            width: r.width,
+                            height: r.height,
+                          };
+                        })()}
+                        side={preview}
+                        ratio={state.ratio}
+                        label={`${sidePhrase[preview][0].toUpperCase()}${sidePhrase[preview].slice(1)} · ${Math.round(state.ratio * 100)}%`}
+                      />
+                    )}
+                    <label>
+                      Tamanho do foco{" "}
+                      <output>{Math.round(state.ratio * 100)}%</output>
+                      <input
+                        aria-label="Proporção do espaço de foco"
+                        type="range"
+                        min=".4"
+                        max=".8"
+                        step=".05"
+                        value={state.ratio}
+                        onChange={(e) =>
+                          store.change((s) => {
+                            s.ratio = +e.target.value;
+                          })
+                        }
+                      />
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <GridPicker
+                      value={grid}
+                      pick={(size) =>
+                        store.preset(gridPreset(size.rows, size.columns))
+                      }
+                    />
+                    <p className="field-note">
+                      De 1×1 (um widget só) até 3 linhas por 4 colunas.
+                    </p>
+                  </>
                 )}
-              </div>
-            ) : (
-              <div
-                className="layout-choices grid-presets"
-                role="group"
-                aria-label="Disposição do grid"
-              >
-                {Object.entries(presetNames)
-                  .filter(([id]) => !id.startsWith("strip-"))
-                  .map(([id, label]) => (
-                    <button
-                      key={id}
-                      aria-pressed={state.preset === id}
-                      onClick={() => store.preset(id as Preset)}
-                    >
-                      {label}
-                    </button>
-                  ))}
-              </div>
-            )}
-            {!state.preset.startsWith("grid-") && (
-              <label>
-                Tamanho do foco{" "}
-                <output>{Math.round(state.ratio * 100)}%</output>
-                <input
-                  aria-label="Proporção do espaço de foco"
-                  type="range"
-                  min=".4"
-                  max=".8"
-                  step=".05"
-                  value={state.ratio}
-                  onChange={(e) =>
-                    store.change((s) => {
-                      s.ratio = +e.target.value;
-                    })
-                  }
-                />
-              </label>
-            )}
-          </fieldset>
+              </fieldset>
+            </>
+          )}
         </Dialog>
       )}
       {catalog && (
         <Dialog title="Adicionar widget" close={() => setCatalog(null)}>
-          <div
-            className="catalog-tabs"
-            role="group"
-            aria-label="Origem dos widgets"
-          >
-            {[
-              ["native", "VIO"],
-              ["live", "Telas"],
-              ["room", "Sala"],
-              ["community", "Comunidade"],
-            ].map(([id, label]) => (
-              <button
-                key={id}
-                aria-pressed={catalogTab === id}
-                onClick={() => setCatalogTab(id)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          {catalogTab === "native" && (
-            <>
-              <div className="widget-catalog">
-                {Object.values(widgetRegistry)
-                  .filter((w) => !["screen", "custom", "canvas"].includes(w.id))
-                  .map((w) => (
-                    <button
-                      className="catalog-item"
-                      key={w.id}
-                      disabled={
-                        w.id === "canvas" ||
-                        (w.id === "chat" &&
-                          !canManageRoom(snapshot, engine.view.id))
-                      }
-                      onClick={() => void addWidget(w.id)}
-                    >
-                      <w.icon size={20} aria-hidden="true" />
-                      <strong>{w.title}</strong>
-                      <span>
-                        {w.id === "chat" &&
-                        !canManageRoom(snapshot, engine.view.id)
-                          ? "Só o criador e administradores adicionam. Chats existentes ficam em Sala."
-                          : w.description}
-                      </span>
-                    </button>
-                  ))}
-              </div>
-            </>
-          )}
-          {catalogTab === "live" && (
-            <>
-              <div className="widget-catalog live-catalog">
-                {!publications.length && (
-                  <p className="widget-empty">
-                    Ninguém está compartilhando tela. As transmissões aparecerão
-                    aqui quando começarem.
-                  </p>
-                )}
-                {publications.map((p) => (
-                  <button
-                    className="catalog-item"
-                    key={p.id}
-                    onClick={() => showPublication(p.id)}
-                  >
-                    <MonitorUp size={19} />
-                    <strong>
-                      {p.own ? "Minha prévia" : `Tela de ${p.title}`}
-                    </strong>
-                    <span>
-                      {engine.view.watching.includes(p.id)
-                        ? "Já está conectada · trazer para o foco"
-                        : "Conecta somente quando você escolher"}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-          {catalogTab === "room" && (
-            <>
-              {!snapshot?.widgets?.length ? (
-                <p className="widget-empty">
-                  Nenhum widget da sala ainda. Crie um na aba VIO.
-                </p>
+          <WidgetCatalog
+            canRoom={createsForRoom}
+            chatAllowed={canManageRoom(snapshot, engine.view.id)}
+            add={(type, scope) => void addWidget(type, scope)}
+            close={() => setCatalog(null)}
+            screens={screenList}
+            showScreen={showPublication}
+            notShown={
+              notShown.length > 0 && (
+                <section className="catalog-group">
+                  <h3>Não exibidos</h3>
+                  <div className="widget-catalog">
+                    {notShown.map((entry) => {
+                      const Icon = entry.icon;
+                      return (
+                        <button
+                          className="catalog-item"
+                          key={entry.id}
+                          onClick={() => {
+                            setCatalog(null);
+                            entry.show();
+                          }}
+                        >
+                          {Icon && <Icon size={20} aria-hidden="true" />}
+                          <span className="catalog-text">
+                            <strong>{entry.name}</strong>
+                            <span>{entry.reason} · Mostrar</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              )
+            }
+            roomWidgets={{
+              count: snapshot?.widgets?.length ?? 0,
+              list: !snapshot?.widgets?.length ? (
+                <p className="widget-empty">Nenhum widget da sala ainda.</p>
               ) : (
-                <div className="widget-catalog">
+                <div className="catalog-results is-rows">
                   {snapshot.widgets.map((w) => (
                     <button
-                      className="catalog-item"
+                      className="catalog-item is-row"
                       key={w.id}
                       onClick={() => openShared(w)}
                     >
-                      <strong>{w.title}</strong>
-                      <span>
-                        Criado por{" "}
-                        {snapshot.participants.find((p) => p.id === w.owner)
-                          ?.name || "alguém que saiu da sala"}
+                      <span className="catalog-text">
+                        <strong>{w.title}</strong>
+                        <span>
+                          Criado por{" "}
+                          {snapshot.participants.find((p) => p.id === w.owner)
+                            ?.name || "alguém que saiu da sala"}{" "}
+                          · Mostrar
+                        </span>
                       </span>
                     </button>
                   ))}
                 </div>
-              )}
-            </>
-          )}
-          {catalogTab === "community" && (
-            <>
-              <button
-                className="catalog-item"
-                onClick={() => setCommunityNotice(true)}
-              >
-                <Blocks size={20} aria-hidden="true" />
-                <strong>Widget personalizado</strong>
-              </button>
-            </>
-          )}
-        </Dialog>
-      )}
-      {catalog && scopeChoice && (
-        <Dialog
-          title={widgetRegistry[scopeChoice].title}
-          centered
-          close={() => setScopeChoice(null)}
-        >
-          <div className="module-scope">
-            <button
-              className="primary"
-              onClick={() => {
-                const type = scopeChoice;
-                setScopeChoice(null);
-                void addWidget(type, "room");
-              }}
-            >
-              <Users size={16} aria-hidden="true" /> Para a sala
-            </button>
-            <button
-              className="secondary"
-              onClick={() => {
-                const type = scopeChoice;
-                setScopeChoice(null);
-                void addWidget(type, "individual");
-              }}
-            >
-              <User size={16} aria-hidden="true" /> Para mim
-            </button>
-          </div>
-        </Dialog>
-      )}
-      {catalog && communityNotice && (
-        <Dialog
-          title="Widgets personalizados"
-          centered
-          close={() => setCommunityNotice(false)}
-        >
-          <p>
-            Em breve, você poderá encontrar widgets criados pela comunidade.
-            Esta área vai crescer com novos widgets para a sua sala.
-          </p>
+              ),
+            }}
+          />
         </Dialog>
       )}
     </div>
