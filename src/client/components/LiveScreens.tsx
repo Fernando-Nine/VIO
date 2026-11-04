@@ -1,15 +1,22 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Radio, X } from "lucide-react";
+import { Music, Radio } from "lucide-react";
 import { AnchoredPopover } from "./AnchoredPopover";
 
-export type LiveScreen = { id: string; title: string; watching: boolean };
-/** Someone started a screen: shown once in the corner, then kept in the bell. */
+export type LiveScreen = {
+  id: string;
+  title: string;
+  watching: boolean;
+  /** Sound without an image (#236): its program name. */
+  sound?: string;
+};
+/** Someone started a screen: a toast at the top, then kept in the bell. */
 export type ScreenEvent = {
   id: string;
   publicationId: string;
   name: string;
   at: number;
   read: boolean;
+  sound?: string;
 };
 
 /** Discreet toolbar icon that exists only while other people are streaming. */
@@ -35,7 +42,7 @@ export function LiveScreens({
   const label =
     screens.length === 1
       ? `${screens[0].title} ao vivo`
-      : `${screens.length} telas ao vivo`;
+      : `${screens.length} transmissões ao vivo`;
   return (
     <div
       className="live-screens"
@@ -60,7 +67,7 @@ export function LiveScreens({
         <AnchoredPopover
           anchor={anchor}
           id={id}
-          label="Telas ao vivo"
+          label="Transmissões ao vivo"
           className="live-screens-panel"
           close={() => setOpen(false)}
           onPointerEnter={() => clearTimeout(timer.current)}
@@ -69,10 +76,28 @@ export function LiveScreens({
           <ul>
             {screens.map((screen) => (
               <li key={screen.id}>
-                <i className="live-pulse" aria-hidden="true" />
-                <span title={screen.title}>{screen.title}</span>
+                {screen.sound ? (
+                  <Music className="live-sound" size={14} aria-label="Só som" />
+                ) : (
+                  <i className="live-pulse" aria-hidden="true" />
+                )}
+                <span
+                  title={
+                    screen.sound
+                      ? `${screen.sound} · ${screen.title}`
+                      : screen.title
+                  }
+                >
+                  {screen.sound ? (
+                    <>
+                      {screen.sound} <small>de {screen.title}</small>
+                    </>
+                  ) : (
+                    screen.title
+                  )}
+                </span>
                 {screen.watching ? (
-                  <small>Assistindo</small>
+                  <small>{screen.sound ? "Ouvindo" : "Assistindo"}</small>
                 ) : (
                   <button
                     className="secondary"
@@ -81,7 +106,7 @@ export function LiveScreens({
                       setOpen(false);
                     }}
                   >
-                    Assistir
+                    {screen.sound ? "Ouvir" : "Assistir"}
                   </button>
                 )}
               </li>
@@ -89,53 +114,6 @@ export function LiveScreens({
           </ul>
         </AnchoredPopover>
       )}
-    </div>
-  );
-}
-
-const TOAST_MS = 6000;
-
-/** Corner label for the latest new screen; hides itself and the bell keeps it. */
-export function ScreenToast({
-  event,
-  watch,
-  done,
-}: {
-  event: ScreenEvent;
-  watch: () => void;
-  done: () => void;
-}) {
-  const [paused, setPaused] = useState(false);
-  useEffect(() => {
-    if (paused) return;
-    const timer = setTimeout(done, TOAST_MS);
-    return () => clearTimeout(timer);
-  }, [event.id, paused, done]);
-  return (
-    <div
-      className="screen-toast"
-      role="status"
-      onPointerEnter={() => setPaused(true)}
-      onPointerLeave={() => setPaused(false)}
-      onFocus={() => setPaused(true)}
-      onBlur={() => setPaused(false)}
-    >
-      <span className="screen-toast-avatar" aria-hidden="true">
-        {[...event.name].slice(0, 2).join("").toUpperCase()}
-      </span>
-      <p>
-        <strong>{event.name}</strong> começou a transmitir
-      </p>
-      <button className="primary" onClick={watch}>
-        Assistir
-      </button>
-      <button
-        className="icon-button"
-        aria-label="Dispensar aviso"
-        onClick={done}
-      >
-        <X size={15} />
-      </button>
     </div>
   );
 }

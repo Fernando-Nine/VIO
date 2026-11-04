@@ -1,4 +1,4 @@
-import { randomUUID, createHmac } from "node:crypto";
+import { randomBytes, randomUUID, createHmac } from "node:crypto";
 import type { Server, Socket } from "socket.io";
 import type { Config } from "./config";
 import { RoomWidgets } from "./widgets";
@@ -6,6 +6,8 @@ import type {
   RoomNotice,
   SharedWidget,
   ChatMessageEvent,
+  WidgetClosed,
+  WidgetUpdatedEvent,
 } from "../shared/widgets";
 import { pollOpen, viewModuleState } from "../shared/room-modules";
 import { defaultColor } from "../shared/colors";
@@ -15,6 +17,11 @@ import {
   stableId,
   generateCode,
   issueToken,
+  issueRoomCredential,
+  verifyRoomCredential,
+  issueInvite,
+  verifyInvite,
+  CREDENTIAL_ADMINS,
   log,
 } from "./security";
 import {
@@ -26,6 +33,7 @@ import {
 } from "../shared/permissions";
 import {
   defaultPermissions,
+  MAX_SCREENS,
   type RoomPermission,
   type RoomPermissions,
   schemas,
@@ -36,6 +44,11 @@ import {
   type Snapshot,
   type Subscription,
   type Action,
+  type JoinResult,
+  type Admission,
+  type InviteResult,
+  type InviteTtl,
+  type WaitingPerson,
 } from "../shared/protocol";
 interface Member extends Participant {
   socketId?: string;
@@ -51,7 +64,48 @@ interface Room {
   creatorId: string;
   permissions: RoomPermissions;
   touched: number;
+  /**
+   * Seat ranking (#226): the rank of the creator's credential (-1 = none).
+   * While `provisional`, the creator got the seat without one (first back after
+   * a restart, or succession) and a credential of at least this rank takes it.
+   */
+  creatorRank: number;
+  provisional: boolean;
+  /** State came from defaults: the next winning credential also restores it. */
+  fresh: boolean;
+  /** Admins who hold a lent seat get admin back when the creator returns. */
+  lentFromAdmin?: string;
+  /** Admins named by a credential who have not come back yet. */
+  restoredAdmins: Set<string>;
+  /** Everyone who has been a member: they skip the waiting room (#242). */
+  known: Set<string>;
+  /** Waiting room of a locked room, by request id. */
+  waiting: Map<string, Waiting>;
+  /** Turned away: they cannot knock again until then. */
+  refused: Map<string, number>;
+  /**
+   * Invite generation (#242). Revoking moves on and remembers the old one, in
+   * memory only: after a restart, revoked invites work until they expire.
+   */
+  inviteGen: string;
+  revokedInvites: Set<string>;
 }
+interface Waiting extends WaitingPerson {
+  person: string;
+  socketId: string;
+}
+const WAIT_TTL = 5 * 60 * 1000;
+const MAX_WAITING = 20;
+const REFUSED_FOR = 60 * 1000;
+const MAX_KNOWN = 500;
+const inviteTtl: Record<InviteTtl, number> = {
+  "1h": 3600 * 1000,
+  "1d": 24 * 3600 * 1000,
+  "7d": 7 * 24 * 3600 * 1000,
+};
+const newInviteGen = () => randomBytes(9).toString("base64url");
+/** Long enough to outlive a weekend; reissued on every join of the creator. */
+const CREDENTIAL_TTL = 30 * 24 * 3600 * 1000;
 const publishPermission = {
   screen: "guestScreen",
   voice: "guestVoice",
@@ -190,9 +244,18 @@ export class Rooms {
         }
       : widget;
   }
-  private emitWidget(room: Room, id: string, widget: SharedWidget | null) {
+  private emitWidget(
+    room: Room,
+    id: string,
+    widget: SharedWidget | null,
+    closed?: WidgetClosed,
+  ) {
     if (!widget?.module || widget.module.kind !== "poll") {
-      this.io.to(room.code).emit("widget-updated", { id, widget });
+      this.io.to(room.code).emit("widget-updated", {
+        id,
+        widget,
+        ...(closed && { closed }),
+      } satisfies WidgetUpdatedEvent);
       return;
     }
     for (const member of room.members.values())
@@ -280,7 +343,114 @@ export class Rooms {
     if (member)
       member.publications = member.publications.filter((v) => v.id !== p.id);
   }
-  private leave(room: Room, member: Member) {
+  private notice(room: Room, text: string) {
+    room.notices.push({ id: randomUUID(), text, createdAt: Date.now() });
+    room.notices = room.notices.slice(-30);
+  }
+  /** Signed creator seat; provisional seats sign rank 0 so any real one wins. */
+  private credential(room: Room) {
+    const admins = new Set(room.restoredAdmins);
+    for (const m of room.members.values())
+      if (m.role === "admin" && m.id !== room.creatorId) admins.add(m.id);
+    return issueRoomCredential(this.config.secret, CREDENTIAL_TTL, {
+      code: room.code,
+      rank: room.provisional ? 0 : room.creatorRank,
+      admins: [...admins].slice(-CREDENTIAL_ADMINS),
+      permissions: room.permissions,
+    });
+  }
+  private sendCredential(room: Room) {
+    this.send(room, room.creatorId, "room-credential", this.credential(room));
+  }
+  private manages(room: Room, id: string) {
+    return this.role(room, id) !== "guest";
+  }
+  /** Managers get the waiting room; with `everyone`, the rest get it emptied. */
+  private emitWaiting(room: Room, everyone = false) {
+    const list = [...room.waiting.values()].map(
+      ({ person, socketId, ...visible }) => visible,
+    );
+    for (const m of room.members.values())
+      if (m.socketId && (everyone || this.manages(room, m.id)))
+        this.io
+          .to(m.socketId)
+          .emit("waiting-list", this.manages(room, m.id) ? list : []);
+  }
+  /** Ends a wait and tells the person why. */
+  private dismiss(room: Room, waiting: Waiting, admission: Admission) {
+    room.waiting.delete(waiting.id);
+    this.io.to(waiting.socketId).emit("admission", admission);
+    this.emitWaiting(room);
+  }
+  private admitAll(room: Room) {
+    for (const w of [...room.waiting.values()]) {
+      this.remember(room, w.person);
+      this.dismiss(room, w, { allowed: true });
+    }
+  }
+  private remember(room: Room, id: string) {
+    room.known.delete(id);
+    room.known.add(id);
+    if (room.known.size > MAX_KNOWN)
+      room.known.delete(room.known.values().next().value!);
+  }
+  /** Puts someone at the door of a locked room; managers decide. */
+  private knock(room: Room, socket: Socket, name: string, color?: string) {
+    const person = socket.data.id as string;
+    const now = Date.now();
+    if ((room.refused.get(person) || 0) > now)
+      throw new Fault(
+        "ENTRY_REFUSED",
+        "Sua entrada foi recusada. Tente de novo mais tarde.",
+      );
+    let waiting = [...room.waiting.values()].find((w) => w.person === person);
+    if (!waiting) {
+      this.limits.take(person + ":knock:" + room.code, 5, 10 * 60000);
+      this.limits.take(socket.data.ip + ":knock", 20, 10 * 60000);
+      if (room.waiting.size >= MAX_WAITING)
+        throw new Fault(
+          "WAITING_FULL",
+          "A sala está trancada e a fila de espera está cheia. Tente mais tarde.",
+        );
+      waiting = {
+        id: randomUUID(),
+        person,
+        name,
+        color: color || defaultColor,
+        since: now,
+        expiresAt: now + WAIT_TTL,
+        socketId: socket.id,
+      };
+      room.waiting.set(waiting.id, waiting);
+    } else {
+      // Same person knocking again (reconnect): keep the place in line.
+      if (waiting.socketId !== socket.id)
+        this.io.to(waiting.socketId).emit("admission", {
+          allowed: false,
+          message: "Você está esperando em outra aba.",
+        } satisfies Admission);
+      Object.assign(waiting, { name, socketId: socket.id });
+    }
+    socket.data.waiting = room.code;
+    this.emitWaiting(room);
+    socket.emit("waiting", { expiresAt: waiting.expiresAt });
+    throw new Fault(
+      "WAITING",
+      "A sala está trancada. Aguarde alguém da sala aceitar sua entrada.",
+    );
+  }
+  /** Leaves the waiting room on purpose or by disconnecting. */
+  private stopWaiting(socket: Socket) {
+    const room = this.rooms.get(socket.data.waiting);
+    socket.data.waiting = undefined;
+    if (!room) return;
+    for (const w of room.waiting.values())
+      if (w.socketId === socket.id) {
+        room.waiting.delete(w.id);
+        this.emitWaiting(room);
+      }
+  }
+  private leave(room: Room, member: Member, explicit = false) {
     for (const p of [...member.publications]) this.removePublication(room, p);
     for (const sub of [...room.subscriptions.values()])
       if (sub.viewer === member.id) this.closeSub(room, sub);
@@ -290,6 +460,16 @@ export class Rooms {
       room.widgets.clear();
       room.notices = [];
       room.permissions = { ...defaultPermissions };
+      room.creatorRank = -1;
+      room.provisional = true;
+      room.fresh = true;
+      room.restoredAdmins.clear();
+      // Nobody left to open the door.
+      for (const w of [...room.waiting.values()])
+        this.dismiss(room, w, {
+          allowed: false,
+          message: "Todos saíram da sala. Tente entrar de novo.",
+        });
     }
     if (room.creatorId === member.id && room.members.size) {
       const members = [...room.members.values()];
@@ -299,13 +479,18 @@ export class Rooms {
         members.find((m) => m.role === "admin") ||
         members[0];
       room.creatorId = next.id;
+      if (next.role === "admin") room.lentFromAdmin = next.id;
       next.role = "creator";
-      room.notices.push({
-        id: randomUUID(),
-        text: `${next.name} agora é o criador da sala.`,
-        createdAt: Date.now(),
-      });
-      room.notices = room.notices.slice(-30);
+      // Leaving on purpose hands the seat over; timing out only lends it.
+      if (explicit && !room.provisional) room.creatorRank = Date.now();
+      else room.provisional = true;
+      this.notice(
+        room,
+        room.provisional
+          ? `${next.name} é o criador da sala até ${member.name} voltar.`
+          : `${next.name} agora é o criador da sala.`,
+      );
+      this.sendCredential(room);
     }
     this.membership.delete(member.id);
     this.broadcast(room, true);
@@ -314,6 +499,14 @@ export class Rooms {
     this.limits.clean();
     const now = Date.now();
     for (const room of this.rooms.values()) {
+      for (const [person, until] of room.refused)
+        if (until <= now) room.refused.delete(person);
+      for (const w of [...room.waiting.values()])
+        if (w.expiresAt <= now)
+          this.dismiss(room, w, {
+            allowed: false,
+            message: "Ninguém respondeu a tempo. Tente entrar de novo.",
+          });
       for (const m of room.members.values())
         if (!m.online && now - m.lastSeen > this.config.grace)
           this.leave(room, m);
@@ -325,6 +518,9 @@ export class Rooms {
     const rates: Record<Action, number> = {
       role: 20,
       moderate: 30,
+      admit: 120,
+      "invite-create": 20,
+      "invite-revoke": 10,
       "room-permissions": 30,
       "chat-send": 45,
       "module-interact": 240,
@@ -332,6 +528,7 @@ export class Rooms {
       "widget-create": 20,
       "widget-structure": 120,
       "widget-delete": 30,
+      "widget-restore": 30,
       "widget-operate": 300,
       demand: 360,
       join: 12,
@@ -413,6 +610,7 @@ export class Rooms {
       }
     });
     socket.on("disconnect", () => {
+      if (socket.data.waiting) this.stopWaiting(socket);
       const code = this.membership.get(socket.data.id);
       const room = code && this.rooms.get(code);
       const m = room && room.members.get(socket.data.id);
@@ -460,6 +658,7 @@ export class Rooms {
     }
     if (action === "join") {
       const current = this.membership.get(socket.data.id);
+      const recreated = !!(data.code || current);
       const code = data.code || current || generateCode();
       if (current && current !== code)
         throw new Fault(
@@ -483,23 +682,79 @@ export class Rooms {
           creatorId: socket.data.id,
           permissions: { ...defaultPermissions },
           touched: Date.now(),
+          // A known code that is gone means a restart: its creator may return.
+          creatorRank: recreated ? -1 : Date.now(),
+          provisional: recreated,
+          fresh: recreated,
+          restoredAdmins: new Set(),
+          known: new Set(),
+          waiting: new Map(),
+          refused: new Map(),
+          inviteGen: newInviteGen(),
+          revokedInvites: new Set(),
         };
         this.rooms.set(code, room);
       }
-      if (!room.members.size) room.creatorId = socket.data.id;
       let member = room.members.get(socket.data.id);
       if (member?.socketId && member.socketId !== socket.id)
         throw new Fault(
           "SESSION_IN_USE",
           "Esta sessão já está aberta em outra aba. Abra uma nova sessão.",
         );
+      const empty = !room.members.size;
+      const claim = verifyRoomCredential(
+        this.config.secret,
+        data.credential,
+        code,
+      );
+      if (socket.data.waiting && socket.data.waiting !== code)
+        this.stopWaiting(socket);
+      if (room.permissions.locked && !empty && !member && !claim) {
+        const invite = verifyInvite(this.config.secret, data.invite, code);
+        if (
+          !room.known.has(socket.data.id) &&
+          !room.restoredAdmins.has(socket.data.id) &&
+          !(invite && !room.revokedInvites.has(invite.gen))
+        )
+          this.knock(room, socket, data.name, data.color);
+      }
+      if (socket.data.waiting) this.stopWaiting(socket);
+      if (empty) room.creatorId = socket.data.id;
+      const reclaim =
+        !!claim &&
+        (claim.rank > room.creatorRank ||
+          (room.provisional && claim.rank >= room.creatorRank));
+      let previous: Member | undefined;
+      if (reclaim) {
+        if (room.creatorId !== socket.data.id)
+          previous = room.members.get(room.creatorId);
+        room.creatorId = socket.data.id;
+        room.creatorRank = claim.rank;
+        room.provisional = claim.rank === 0;
+        if (room.fresh) room.permissions = { ...claim.permissions };
+        room.fresh = false;
+        for (const id of claim.admins)
+          if (id === socket.data.id) continue;
+          else if (room.members.has(id)) room.members.get(id)!.role = "admin";
+          else room.restoredAdmins.add(id);
+        if (previous)
+          previous.role =
+            claim.admins.includes(previous.id) ||
+            room.lentFromAdmin === previous.id
+              ? "admin"
+              : "guest";
+        room.lentFromAdmin = undefined;
+      }
+      const restoredAdmin = room.restoredAdmins.delete(socket.data.id);
       member = {
         id: socket.data.id,
         name: data.name,
         role:
           room.creatorId === socket.data.id
             ? "creator"
-            : member?.role || "guest",
+            : restoredAdmin
+              ? "admin"
+              : member?.role || "guest",
         color: member?.color || data.color || defaultColor,
         online: true,
         inCall: member?.inCall || false,
@@ -509,12 +764,37 @@ export class Rooms {
       };
       room.members.set(member.id, member);
       this.membership.set(member.id, code);
+      this.remember(room, member.id);
+      if (previous) {
+        this.notice(
+          room,
+          `${member.name} voltou e é de novo o criador da sala.`,
+        );
+        this.send(room, previous.id, "room-credential", null);
+        this.enforcePublications(room);
+      } else if (empty && room.provisional && !reclaim)
+        this.notice(
+          room,
+          `${member.name} é o criador da sala até o criador anterior voltar.`,
+        );
       await socket.join(code);
       this.broadcast(room, member.id);
+      if (room.waiting.size && this.manages(room, member.id))
+        this.emitWaiting(room);
       for (const sub of room.subscriptions.values())
         if (sub.viewer === member.id || sub.publication.owner === member.id)
           socket.emit("subscription", sub);
-      return { id: member.id, snapshot: this.snapshot(room, member.id) };
+      return {
+        id: member.id,
+        snapshot: this.snapshot(room, member.id),
+        ...(room.creatorId === member.id && {
+          credential: this.credential(room),
+        }),
+      } satisfies JoinResult;
+    }
+    if (action === "leave" && socket.data.waiting) {
+      this.stopWaiting(socket);
+      return {};
     }
     const [room, m] = this.member(socket);
     const manages = m.id === room.creatorId || m.role === "admin";
@@ -546,9 +826,45 @@ export class Rooms {
             `Só o criador decide se administradores podem ${permissionText[key]}.`,
           );
       room.permissions = { ...room.permissions, ...data.permissions };
+      if (!room.permissions.locked) this.admitAll(room);
       this.enforcePublications(room);
+      this.sendCredential(room);
       this.broadcast(room);
       return room.permissions;
+    }
+    if (action === "admit") {
+      if (!manages) deny();
+      const waiting = room.waiting.get(data.id);
+      if (!waiting)
+        throw new Fault("NOT_FOUND", "Esta pessoa não está mais esperando.");
+      if (data.allow) this.remember(room, waiting.person);
+      else room.refused.set(waiting.person, Date.now() + REFUSED_FOR);
+      this.dismiss(
+        room,
+        waiting,
+        data.allow
+          ? { allowed: true }
+          : { allowed: false, message: "Sua entrada na sala foi recusada." },
+      );
+      return {};
+    }
+    if (action === "invite-create") {
+      if (!manages) deny();
+      const expiresAt = Date.now() + inviteTtl[data.ttl as InviteTtl];
+      return {
+        invite: issueInvite(this.config.secret, {
+          code: room.code,
+          gen: room.inviteGen,
+          exp: expiresAt,
+        }),
+        expiresAt,
+      } satisfies InviteResult;
+    }
+    if (action === "invite-revoke") {
+      if (!manages) deny();
+      room.revokedInvites.add(room.inviteGen);
+      room.inviteGen = newInviteGen();
+      return {};
     }
     if (action === "moderate") {
       if (m.id !== room.creatorId)
@@ -572,19 +888,21 @@ export class Rooms {
       if (!target || target.id === m.id)
         throw new Fault("INVALID_REQUEST", "Escolha outra pessoa da sala.");
       if (data.action === "transfer") {
+        if (room.provisional && target.role === "admin")
+          room.lentFromAdmin = target.id;
         m.role = "admin";
         target.role = "creator";
         target.voiceBlocked = undefined;
         room.creatorId = target.id;
-        room.notices.push({
-          id: randomUUID(),
-          text: `${target.name} agora é o criador da sala.`,
-          createdAt: Date.now(),
-        });
-        room.notices = room.notices.slice(-30);
+        // A provisional creator can only lend the seat it was lent.
+        if (!room.provisional) room.creatorRank = Date.now();
+        this.send(room, m.id, "room-credential", null);
+        this.notice(room, `${target.name} agora é o criador da sala.`);
       } else target.role = data.action === "promote" ? "admin" : "guest";
       this.enforcePublications(room);
+      this.sendCredential(room);
       this.broadcast(room);
+      if (room.waiting.size) this.emitWaiting(room, true);
       return {};
     }
     if (action === "module-interact") {
@@ -677,14 +995,24 @@ export class Rooms {
           data.operation,
         );
       }
+      // Room owner, admins (if allowed) and the widget's creator close for all.
+      const mayClose = (target: SharedWidget) => {
+        if (target.owner === m.id) return;
+        if (!manages) deny();
+        if (role === "admin") require("adminClose");
+      };
+      let closed: WidgetClosed | undefined;
       if (action === "widget-delete") {
-        if (current && current.owner !== m.id) {
-          if (!manages) deny();
-          if (role === "admin") require("adminClose");
-        }
-        room.widgets.remove(m.id, data.id, true);
+        if (current) mayClose(current);
+        closed = room.widgets.close(data.id, m.id, m.name);
       }
-      this.emitWidget(room, data.id, widget || null);
+      if (action === "widget-restore") {
+        const held = room.widgets.held(data.id);
+        if (held.by !== m.id) mayClose(held.widget);
+        widget = room.widgets.restore(data.id);
+        this.scheduleReveal(room, widget);
+      }
+      this.emitWidget(room, data.id, widget || null, closed);
       return widget ? this.view(widget, m.id) : {};
     }
     if (action === "demand") {
@@ -693,7 +1021,7 @@ export class Rooms {
         !sub ||
         sub.viewer !== m.id ||
         sub.tier !== "main" ||
-        sub.publication.kind !== "screen"
+        sub.publication.kind === "voice"
       )
         throw new Fault("FORBIDDEN", "Demanda de vídeo não autorizada.");
       sub.demand = { video: data.video, height: data.height };
@@ -709,7 +1037,7 @@ export class Rooms {
       return { color: m.color };
     }
     if (action === "leave") {
-      this.leave(room, m);
+      this.leave(room, m, true);
       await socket.leave(room.code);
       return {};
     }
@@ -724,13 +1052,25 @@ export class Rooms {
     if (action === "publish") {
       require(publishPermission[data.kind as Publication["kind"]]);
       if (data.kind === "voice" && m.voiceBlocked) voiceBlocked();
+      // Sound only is a screen slot with sound and nothing else (#236).
+      if (data.audioOnly && (data.kind !== "screen" || !data.audio))
+        throw new Fault("INVALID_REQUEST", "Escolha um som para transmitir.");
+      if (data.label !== undefined && !data.audioOnly)
+        throw new Fault("INVALID_REQUEST", "Só um som sem tela leva nome.");
       if (data.kind !== "screen") m.inCall = true;
       let p = m.publications.find(
         (p) => p.kind === data.kind && p.key === data.key,
       );
       if (!p) {
-        const existing = m.publications.find((p) => p.kind === data.kind);
-        if (existing) this.removePublication(room, existing);
+        // Screens add up to MAX_SCREENS (#194); voice and camera replace.
+        const same = m.publications.filter((p) => p.kind === data.kind);
+        if (data.kind !== "screen")
+          for (const existing of same) this.removePublication(room, existing);
+        else if (same.length >= MAX_SCREENS)
+          throw new Fault(
+            "SCREEN_LIMIT",
+            "Você já transmite 3 telas. Encerre uma para compartilhar outra.",
+          );
         p = {
           id: stableId(
             this.config.secret,
@@ -742,11 +1082,19 @@ export class Rooms {
           key: data.key,
           audio: data.audio,
           muted: data.muted,
+          ...(data.audioOnly ? { audioOnly: true, label: data.label } : {}),
         };
         m.publications.push(p);
       } else {
         p.audio = data.audio;
         p.muted = data.muted;
+        if (data.audioOnly) {
+          p.audioOnly = true;
+          p.label = data.label;
+        } else {
+          delete p.audioOnly;
+          delete p.label;
+        }
       }
       this.broadcast(room);
       return p;

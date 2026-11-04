@@ -2,18 +2,13 @@ import { useCallback, useRef, useState } from "react";
 import {
   AudioLines,
   Crown,
-  Eye,
   HeadphoneOff,
-  KeyRound,
-  Mic,
   MicOff,
   Monitor,
   MoreHorizontal,
-  Palette,
-  Volume2,
   VolumeX,
   ShieldCheck,
-  ShieldOff,
+  Music,
 } from "lucide-react";
 import {
   canManageRoom,
@@ -27,8 +22,7 @@ import {
   type RoomPermission,
 } from "../../shared/protocol";
 import type { Controller } from "../room/controller";
-import { ContextMenu, type MenuItem } from "./ContextMenu";
-import { Dialog } from "./Dialog";
+import { menuPoint, usePersonMenu } from "./PersonMenu";
 import { useSpeaking } from "./Media";
 import { participantStyle } from "./participant-style";
 import { RoomLimit } from "./RoomStatus";
@@ -47,7 +41,8 @@ function PersonRow({
 }) {
   const own = person.id === engine.view.id;
   const voice = person.publications.find((p) => p.kind === "voice");
-  const screen = person.publications.find((p) => p.kind === "screen");
+  const shares = person.publications.filter((p) => p.kind === "screen");
+  const screen = shares.find((p) => !p.audioOnly) || shares[0];
   const stream = voice
     ? own
       ? engine.captures.sources.get("voice")?.stream
@@ -80,13 +75,7 @@ function PersonRow({
       onContextMenu={(event) => {
         if (!hasMenu) return;
         event.preventDefault();
-        const box = event.currentTarget.getBoundingClientRect();
-        openMenu(
-          event.clientX || event.clientY
-            ? { x: event.clientX, y: event.clientY }
-            : { x: box.left + 12, y: box.bottom },
-          event.currentTarget,
-        );
+        openMenu(menuPoint(event), event.currentTarget);
       }}
       // Touch: a long press opens the same menu.
       onPointerDown={(event) => {
@@ -125,14 +114,22 @@ function PersonRow({
         )}
       </span>
       <span className="person-state">
-        {screen && (
-          <Monitor
-            size={16}
-            className="is-sharing"
-            role="img"
-            aria-label="Transmitindo"
-          />
-        )}
+        {screen &&
+          (screen.audioOnly ? (
+            <Music
+              size={16}
+              className="is-sharing"
+              role="img"
+              aria-label="Transmitindo som"
+            />
+          ) : (
+            <Monitor
+              size={16}
+              className="is-sharing"
+              role="img"
+              aria-label="Transmitindo"
+            />
+          ))}
         {silenced && (
           <VolumeX
             size={16}
@@ -179,142 +176,10 @@ export function PeoplePanel({
 }) {
   const members = engine.view.snapshot?.participants || [];
   const [tab, setTab] = useState<"people" | "permissions">("people");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [menu, setMenu] = useState<{
-    id: string;
-    at: { x: number; y: number };
-    origin: Element;
-  } | null>(null);
-  const [permissionsOf, setPermissionsOf] = useState<string | null>(null);
-  const [transferTo, setTransferTo] = useState<Participant | null>(null);
   const snapshot = engine.view.snapshot;
   const manages = canManageRoom(snapshot, engine.view.id);
-  const creator = snapshot?.creatorId === engine.view.id;
-  const widgets = snapshot?.widgets || [];
-  async function run(
-    action: Parameters<Controller["request"]>[0],
-    data: unknown,
-  ) {
-    setBusy(true);
-    setError("");
-    try {
-      await engine.request(action, data);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Não foi possível concluir.");
-    } finally {
-      setBusy(false);
-    }
-  }
-  function actions(person: Participant): MenuItem[] {
-    if (person.id === engine.view.id)
-      return [{ label: "Minha cor", icon: Palette, run: editColor }];
-    // Groups in a fixed order (watch, voice, room roles); each non-empty
-    // group after the first opens with a separator.
-    const watch: MenuItem[] = [];
-    const voice: MenuItem[] = [];
-    const room: MenuItem[] = [];
-    const screen = person.publications.find((p) => p.kind === "screen");
-    if (screen && !engine.view.watching.includes(screen.id))
-      watch.push({
-        label: "Assistir a tela",
-        icon: Eye,
-        run: () => engine.watch(screen.id, true),
-      });
-    const silenced = engine.volumes.get(person.id) === 0;
-    voice.push(
-      silenced
-        ? {
-            label: "Ativar para mim",
-            icon: Volume2,
-            run: () => {
-              engine.volumes.set(
-                person.id,
-                engine.silencedVolumes.get(person.id) || 1,
-              );
-              engine.bump();
-            },
-          }
-        : {
-            label: "Silenciar para mim",
-            icon: VolumeX,
-            run: () => {
-              engine.silencedVolumes.set(
-                person.id,
-                engine.volumes.get(person.id) ?? 1,
-              );
-              engine.volumes.set(person.id, 0);
-              engine.bump();
-            },
-          },
-    );
-    if (creator)
-      voice.push(
-        person.voiceBlocked
-          ? {
-              label: "Liberar voz",
-              icon: Mic,
-              run: () =>
-                void run("moderate", {
-                  participantId: person.id,
-                  voiceBlocked: false,
-                }),
-            }
-          : {
-              label: "Silenciar para todos",
-              icon: MicOff,
-              danger: true,
-              run: () =>
-                void run("moderate", {
-                  participantId: person.id,
-                  voiceBlocked: true,
-                }),
-            },
-      );
-    if (creator)
-      room.push(
-        person.role === "admin"
-          ? {
-              label: "Revogar administrador",
-              icon: ShieldOff,
-              run: () =>
-                void run("role", {
-                  participantId: person.id,
-                  action: "revoke",
-                }),
-            }
-          : {
-              label: "Tornar administrador",
-              icon: ShieldCheck,
-              run: () =>
-                void run("role", {
-                  participantId: person.id,
-                  action: "promote",
-                }),
-            },
-      );
-    if (manages && person.role === "guest" && widgets.length)
-      room.push({
-        label: "Permissões de edição",
-        icon: KeyRound,
-        run: () => setPermissionsOf(person.id),
-      });
-    if (creator)
-      room.push({
-        label: "Transferir posse da sala",
-        icon: Crown,
-        danger: true,
-        run: () => setTransferTo(person),
-      });
-    return [watch, voice, room]
-      .filter((group) => group.length)
-      .flatMap((group, i) =>
-        group.map((item, j) => (i && !j ? { ...item, separated: true } : item)),
-      );
-  }
-  const menuPerson = members.find((p) => p.id === menu?.id);
-  const permissionsPerson = members.find((p) => p.id === permissionsOf);
-  const volume = menuPerson && engine.volumes.get(menuPerson.id);
+  const menu = usePersonMenu(engine, editColor, { volume: true });
+  const { run, busy } = menu;
   return (
     <>
       {manages && (
@@ -351,9 +216,7 @@ export function PeoplePanel({
                 person={person}
                 engine={engine}
                 hasMenu={!busy}
-                openMenu={(at, origin) =>
-                  setMenu({ id: person.id, at, origin })
-                }
+                openMenu={(at, origin) => menu.open(person.id, at, origin)}
               />
             ))}
           </ul>
@@ -409,90 +272,7 @@ export function PeoplePanel({
           ))}
         </div>
       )}
-      {error && <p role="alert">{error}</p>}
-      {menu && menuPerson && (
-        <ContextMenu
-          at={menu.at}
-          origin={menu.origin}
-          className="person-menu"
-          items={actions(menuPerson)}
-          label={`Ações de ${menuPerson.name}`}
-          close={() => setMenu(null)}
-          header={
-            menuPerson.id !== engine.view.id && (
-              <label className="person-menu-volume">
-                <span>
-                  Volume <output>{Math.round((volume ?? 1) * 100)}%</output>
-                </span>
-                <input
-                  type="range"
-                  min="0"
-                  max="2"
-                  step=".05"
-                  aria-label={`Volume de ${menuPerson.name} para você`}
-                  value={volume ?? 1}
-                  onChange={(event) =>
-                    engine.setPersonVolume(menuPerson.id, +event.target.value)
-                  }
-                />
-              </label>
-            )
-          }
-        />
-      )}
-      {permissionsPerson && (
-        <Dialog
-          title={`Edição por ${permissionsPerson.name}`}
-          centered
-          close={() => setPermissionsOf(null)}
-        >
-          {widgets.map((w) => (
-            <label className="widget-permission" key={w.id}>
-              <input
-                type="checkbox"
-                disabled={busy || w.allGuestsEdit}
-                checked={
-                  !!w.allGuestsEdit ||
-                  !!w.guestEditors?.includes(permissionsPerson.id)
-                }
-                onChange={(e) =>
-                  void run("widget-permission", {
-                    id: w.id,
-                    participantId: permissionsPerson.id,
-                    allowed: e.target.checked,
-                  })
-                }
-              />
-              {w.title}
-            </label>
-          ))}
-        </Dialog>
-      )}
-      {transferTo && (
-        <Dialog
-          title={`Transferir a sala para ${transferTo.name}?`}
-          centered
-          close={() => setTransferTo(null)}
-        >
-          <p>Você deixa de ser o criador e passa a ser administrador.</p>
-          <div className="notification-actions">
-            <button
-              className="primary"
-              disabled={busy}
-              onClick={() => {
-                const id = transferTo.id;
-                setTransferTo(null);
-                void run("role", { participantId: id, action: "transfer" });
-              }}
-            >
-              Transferir
-            </button>
-            <button className="secondary" onClick={() => setTransferTo(null)}>
-              Cancelar
-            </button>
-          </div>
-        </Dialog>
-      )}
+      {menu.node}
     </>
   );
 }

@@ -7,9 +7,16 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "desktop_capabilities",
             "desktop_sources",
+            "desktop_sound_icon",
             "desktop_start_audio",
             "desktop_read_audio",
             "desktop_stop_audio",
+            "desktop_video_sources",
+            "desktop_video_thumbnail",
+            "desktop_video_start",
+            "desktop_video_wait",
+            "desktop_video_stop",
+            "desktop_share_audio",
         ]),
     ))
     .expect("Tauri configuration must be valid");

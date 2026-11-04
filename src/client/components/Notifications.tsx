@@ -8,7 +8,7 @@ import type { ScreenEvent } from "./LiveScreens";
 type Item = {
   id: string;
   text: string;
-  /** Already seen elsewhere (e.g. acted on from the corner label). */
+  /** Already acted on elsewhere (e.g. Assistir on the toast). */
   read?: boolean;
   time?: number;
   onDismiss?: () => void;
@@ -19,36 +19,36 @@ export function Notifications({
   openWidget,
   openScreen,
   screenEvents,
+  closeEvents,
+  closedIds,
   onOpenChange,
 }: {
   engine: Controller;
   openWidget: (widget: SharedWidget) => void;
   openScreen: (id: string) => void;
-  /** Newest last; the one still shown in the corner is left out by the caller. */
+  /** Newest last. */
   screenEvents: ScreenEvent[];
+  /** "Nine fechou o Cronômetro." for closes made by someone else. */
+  closeEvents: { id: string; text: string; at: number }[];
+  /** Room widgets you closed with −: not news anymore. */
+  closedIds: string[];
   onOpenChange: (open: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [dismissed, setDismissed] = useState(new Set<string>());
   const [seen, setSeen] = useState(new Set<string>());
+  /** Unread when the bell opened: they keep the dot until it closes. */
+  const [fresh, setFresh] = useState(new Set<string>());
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const anchor = useRef<HTMLButtonElement>(null);
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const id = useId();
-  const suppressFocus = useRef(false);
+  // Opens only on click (or Enter/Space), never on hover or focus.
   const set = (value: boolean) => {
-    clearTimeout(timer.current);
+    if (!value) setFresh(new Set());
     setOpen(value);
     onOpenChange(value);
   };
-  const leave = () => {
-    timer.current = setTimeout(() => {
-      if (!document.getElementById(id)?.contains(document.activeElement))
-        set(false);
-    }, 600);
-  };
-  useEffect(() => () => clearTimeout(timer.current), []);
   useEffect(() => {
     if (!open) return;
     const blur = (event: FocusEvent) => {
@@ -70,18 +70,28 @@ export function Notifications({
   for (const event of screenEvents)
     items.push({
       id: `screen:${event.id}`,
-      text: `${event.name} começou a transmitir`,
+      text: event.sound
+        ? `${event.name} começou a transmitir o som de ${event.sound}`
+        : `${event.name} começou a transmitir`,
       read: event.read,
       time: event.at,
       actions:
         live.has(event.publicationId) &&
         !engine.view.watching.includes(event.publicationId)
-          ? [{ label: "Assistir", run: () => openScreen(event.publicationId) }]
+          ? [
+              {
+                label: event.sound ? "Ouvir" : "Assistir",
+                run: () => openScreen(event.publicationId),
+              },
+            ]
           : [],
     });
+  for (const event of closeEvents)
+    items.push({ id: `closed:${event.id}`, text: event.text, time: event.at });
   for (const widget of snapshot?.widgets || []) {
     if (
       widget.owner !== engine.view.id &&
+      !closedIds.includes(widget.id) &&
       !state.widgets.some((w) => w.config.sharedId === widget.id)
     )
       items.push({
@@ -118,21 +128,31 @@ export function Notifications({
   const unread = remaining.filter((item) => !item.read && !seen.has(item.id));
   // Opening the bell clears the count; the items stay as history.
   useEffect(() => {
-    if (open && unread.length)
-      setSeen((previous) => new Set([...previous, ...unread.map((i) => i.id)]));
+    if (!open || !unread.length) return;
+    const ids = unread.map((i) => i.id);
+    setSeen((previous) => new Set([...previous, ...ids]));
+    setFresh((previous) => new Set([...previous, ...ids]));
   });
-  const dismiss = (item: Item) => {
-    item.onDismiss?.();
-    setDismissed((previous) => new Set([...previous, item.id]));
+  const dismiss = (...list: Item[]) => {
+    for (const item of list) item.onDismiss?.();
+    setDismissed(
+      (previous) => new Set([...previous, ...list.map((i) => i.id)]),
+    );
   };
+  // "Agora" is the last hour; items without a time are current state.
+  const hourAgo = Date.now() - 3600000;
+  const groups = [
+    {
+      title: "Agora",
+      items: remaining.filter((i) => !i.time || i.time >= hourAgo),
+    },
+    {
+      title: "Antes",
+      items: remaining.filter((i) => i.time && i.time < hourAgo),
+    },
+  ].filter((g) => g.items.length);
   return (
-    <div
-      className="notifications-trigger"
-      onPointerEnter={(e) => {
-        if (e.pointerType === "mouse") set(true);
-      }}
-      onPointerLeave={leave}
-    >
+    <div className="notifications-trigger">
       <button
         ref={anchor}
         className="text-button"
@@ -143,14 +163,7 @@ export function Notifications({
         }
         aria-expanded={open}
         aria-controls={open ? id : undefined}
-        onFocus={() => {
-          if (
-            !suppressFocus.current &&
-            anchor.current?.matches(":focus-visible")
-          )
-            set(true);
-        }}
-        onClick={() => set(true)}
+        onClick={() => set(!open)}
       >
         <Bell size={17} />
         {unread.length > 0 && (
@@ -168,68 +181,83 @@ export function Notifications({
           id={id}
           label="Notificações"
           className="notifications-panel"
-          close={() => {
-            suppressFocus.current = true;
-            set(false);
-            queueMicrotask(() => {
-              suppressFocus.current = false;
-            });
-          }}
-          onPointerEnter={() => clearTimeout(timer.current)}
-          onPointerLeave={leave}
+          close={() => set(false)}
         >
           <header>
             <strong>Notificações</strong>
+            {!!remaining.length && (
+              <button
+                className="text-button"
+                onClick={() => dismiss(...remaining)}
+              >
+                Limpar
+              </button>
+            )}
           </header>
           {!remaining.length && <p>Nenhuma notificação.</p>}
-          {remaining.map((item) => (
-            <article key={item.id}>
-              <p>
-                {item.text}
-                {item.time && (
-                  <time dateTime={new Date(item.time).toISOString()}>
-                    {new Date(item.time).toLocaleTimeString("pt-BR", {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </time>
-                )}
-              </p>
-              <div className="notification-actions">
-                {item.actions?.map((action) => (
-                  <button
-                    key={action.label}
-                    className="secondary"
-                    disabled={!!busy}
-                    onClick={async () => {
-                      setBusy(item.id);
-                      setError("");
-                      try {
-                        await action.run();
-                        set(false);
-                      } catch (e) {
-                        setError(
-                          e instanceof Error
-                            ? e.message
-                            : "Não foi possível concluir.",
-                        );
-                      } finally {
-                        setBusy("");
-                      }
-                    }}
-                  >
-                    {action.label}
-                  </button>
-                ))}
-                <button
-                  className="text-button"
-                  aria-label={`Excluir da lista: ${item.text}`}
-                  onClick={() => dismiss(item)}
+          {groups.map((group) => (
+            <section key={group.title} aria-label={group.title}>
+              <h3 className="notification-group">{group.title}</h3>
+              {group.items.map((item) => (
+                <article
+                  key={item.id}
+                  className={fresh.has(item.id) ? "is-unread" : undefined}
                 >
-                  Excluir
-                </button>
-              </div>
-            </article>
+                  {fresh.has(item.id) && (
+                    <i
+                      className="notification-dot"
+                      role="img"
+                      aria-label="Não lida"
+                    />
+                  )}
+                  <p>
+                    {item.text}
+                    {item.time && (
+                      <time dateTime={new Date(item.time).toISOString()}>
+                        {new Date(item.time).toLocaleTimeString("pt-BR", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </time>
+                    )}
+                  </p>
+                  <div className="notification-actions">
+                    {item.actions?.map((action) => (
+                      <button
+                        key={action.label}
+                        className="secondary"
+                        disabled={!!busy}
+                        onClick={async () => {
+                          setBusy(item.id);
+                          setError("");
+                          try {
+                            await action.run();
+                            set(false);
+                          } catch (e) {
+                            setError(
+                              e instanceof Error
+                                ? e.message
+                                : "Não foi possível concluir.",
+                            );
+                          } finally {
+                            setBusy("");
+                          }
+                        }}
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                    <button
+                      className="text-button"
+                      aria-label={`Excluir da lista: ${item.text}`}
+                      onClick={() => dismiss(item)}
+                    >
+                      Excluir
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </section>
           ))}
           {error && <p role="alert">{error}</p>}
         </AnchoredPopover>

@@ -1,0 +1,1068 @@
+// Native screen video (#192): Windows.Graphics.Capture frames are scaled and converted
+// to NV12 on the GPU, read back once and written into a WebView2 SharedBuffer. The page
+// turns them into a MediaStreamTrackGenerator track; pixels never cross the IPC, which
+// only carries a small "frame N is in slot S" tick. Nothing leaves the PC except through
+// the page's own WebRTC connections.
+use crate::{
+    capture::{key, Owned},
+    duplication::{self, Duplicator},
+    printwindow::WindowCopier,
+    log,
+    video::{borderless, Apartment, Gpu, VideoManager},
+    wire,
+};
+use serde::Serialize;
+use std::{
+    collections::HashMap,
+    panic::AssertUnwindSafe,
+    sync::{
+        atomic::{fence, AtomicBool, Ordering},
+        mpsc, Arc, Condvar, Mutex,
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
+use tauri::{AppHandle, Manager as _, WebviewWindow};
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    ICoreWebView2Environment12, ICoreWebView2SharedBuffer, ICoreWebView2_17,
+    COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_ONLY,
+};
+use windows::{
+    core::{Interface, HSTRING},
+    Foundation::{TimeSpan, TypedEventHandler},
+    Graphics::{
+        Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem},
+        DirectX::DirectXPixelFormat,
+        SizeInt32,
+    },
+    Win32::{
+        Foundation::{HANDLE, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        Graphics::{
+            Direct3D11::*,
+            Dxgi::Common::{
+                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+                DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+            },
+        },
+        System::{
+            Threading::{CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject},
+            WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess,
+        },
+    },
+};
+
+pub const MAX_STREAMS: usize = 3;
+const MAX_WIDTH: u32 = 3840;
+const MAX_HEIGHT: u32 = 2160;
+/// Black in studio-range YCbCr.
+const BLACK: D3D11_VIDEO_COLOR = D3D11_VIDEO_COLOR {
+    Anonymous: D3D11_VIDEO_COLOR_0 {
+        YCbCr: D3D11_VIDEO_COLOR_YCbCrA {
+            Y: 0.0625,
+            Cb: 0.5,
+            Cr: 0.5,
+            A: 1.0,
+        },
+    },
+};
+
+/// The SharedBuffer COM object lives on the UI thread; only its mapping crosses threads.
+struct UiBuffer(ICoreWebView2SharedBuffer);
+unsafe impl Send for UiBuffer {}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Mapping(*mut u8, usize);
+// The mapping stays valid until the UI thread closes the buffer, after the worker joins.
+unsafe impl Send for Mapping {}
+
+#[derive(Default, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tick {
+    /// Last written frame; 0 before the first.
+    sequence: u32,
+    slot: u32,
+    /// 0 starting, 1 running, 2 ended (window closed or stopped), 3 failed.
+    state: u32,
+    /// Frames written and GPU→page milliseconds over the last full second, for the bench.
+    fps: u32,
+    busy_ms: f32,
+    /// False when the GPU has no video processor and NV12 is made on the CPU.
+    gpu: bool,
+}
+
+pub(crate) struct Frames {
+    tick: Mutex<Tick>,
+    changed: Condvar,
+    stopping: AtomicBool,
+    closed: Arc<AtomicBool>,
+    stop_event: Owned,
+    frame_event: Owned,
+}
+
+impl Frames {
+    pub fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::Acquire)
+    }
+
+    /// Sleeps up to `time`, waking early when the share stops.
+    pub fn sleep(&self, time: Duration) {
+        unsafe { WaitForSingleObject(self.stop_event.0, time.as_millis().min(1000) as u32) };
+    }
+
+    /// First frame on its way: the page starts reading.
+    pub fn running(&self, gpu: bool) {
+        self.set(|t| {
+            t.state = 1;
+            t.gpu = gpu;
+        });
+    }
+
+    pub fn set(&self, update: impl FnOnce(&mut Tick)) {
+        let mut tick = self.tick.lock().unwrap_or_else(|e| e.into_inner());
+        update(&mut tick);
+        self.changed.notify_all();
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Options {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub cursor: bool,
+}
+
+/// GPU path: the video processor scales and converts; only NV12 is read back.
+struct Processor {
+    video: ID3D11VideoContext1,
+    device: ID3D11VideoDevice,
+    enumerator: ID3D11VideoProcessorEnumerator,
+    processor: ID3D11VideoProcessor,
+    output_view: ID3D11VideoProcessorOutputView,
+    output: ID3D11Texture2D,
+    staging: ID3D11Texture2D,
+}
+
+enum Path {
+    Gpu(Processor),
+    /// No video processor (basic display driver, VMs): BGRA is read back and converted here.
+    Cpu {
+        staging: Option<(ID3D11Texture2D, u32, u32)>,
+        nv12: Vec<u8>,
+    },
+}
+
+pub(crate) struct Pipeline {
+    pub gpu: Gpu,
+    path: Path,
+    options: Options,
+}
+
+fn texture(gpu: &Gpu, width: u32, height: u32, format: DXGI_FORMAT, staging: bool) -> windows::core::Result<ID3D11Texture2D> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: format,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: if staging { D3D11_USAGE_STAGING } else { D3D11_USAGE_DEFAULT },
+        BindFlags: if staging { 0 } else { D3D11_BIND_RENDER_TARGET.0 as u32 },
+        CPUAccessFlags: if staging { D3D11_CPU_ACCESS_READ.0 as u32 } else { 0 },
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    unsafe { gpu.device.CreateTexture2D(&desc, None, Some(&mut texture)) }?;
+    texture.ok_or(windows::core::Error::empty())
+}
+
+impl Processor {
+    fn new(gpu: &Gpu, input: SizeInt32, options: Options) -> windows::core::Result<Self> {
+        let device: ID3D11VideoDevice = gpu.device.cast()?;
+        let video: ID3D11VideoContext1 = gpu.context.cast()?;
+        let rate = DXGI_RATIONAL {
+            Numerator: options.fps,
+            Denominator: 1,
+        };
+        let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+            InputFrameRate: rate,
+            InputWidth: input.Width.max(2) as u32,
+            InputHeight: input.Height.max(2) as u32,
+            OutputFrameRate: rate,
+            OutputWidth: options.width,
+            OutputHeight: options.height,
+            Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+        };
+        let enumerator = unsafe { device.CreateVideoProcessorEnumerator(&content) }?;
+        let processor = unsafe { device.CreateVideoProcessor(&enumerator, 0) }?;
+        let output = texture(gpu, options.width, options.height, DXGI_FORMAT_NV12, false)?;
+        let staging = texture(gpu, options.width, options.height, DXGI_FORMAT_NV12, true)?;
+        let view = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+            ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+            },
+        };
+        let mut output_view = None;
+        unsafe { device.CreateVideoProcessorOutputView(&output, &enumerator, &view, Some(&mut output_view)) }?;
+        let output_view = output_view.ok_or(windows::core::Error::empty())?;
+        unsafe {
+            video.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+            video.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
+            video.VideoProcessorSetStreamColorSpace1(&processor, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+            video.VideoProcessorSetOutputColorSpace1(&processor, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
+            video.VideoProcessorSetOutputBackgroundColor(&processor, true, &BLACK);
+        }
+        Ok(Self {
+            video,
+            device,
+            enumerator,
+            processor,
+            output_view,
+            output,
+            staging,
+        })
+    }
+}
+
+impl Pipeline {
+    pub fn new(input: SizeInt32, options: Options) -> windows::core::Result<Self> {
+        Self::on(Gpu::new()?, input, options)
+    }
+
+    /// On a given device (Desktop Duplication needs the GPU that drives the screen).
+    pub fn on(gpu: Gpu, input: SizeInt32, options: Options) -> windows::core::Result<Self> {
+        let path = match Processor::new(&gpu, input, options) {
+            Ok(processor) => Path::Gpu(processor),
+            Err(_) => Path::Cpu {
+                staging: None,
+                nv12: vec![0; wire::nv12_size(options.width, options.height)],
+            },
+        };
+        Ok(Self { gpu, path, options })
+    }
+
+    pub fn on_gpu(&self) -> bool {
+        matches!(self.path, Path::Gpu(_))
+    }
+
+    /// The video processor is built for one input size; a resized source needs a new one.
+    pub fn resize(&mut self, input: SizeInt32) -> windows::core::Result<()> {
+        if let Path::Gpu(_) = self.path {
+            self.path = Path::Gpu(Processor::new(&self.gpu, input, self.options)?);
+        }
+        Ok(())
+    }
+
+    /// Scales `source` (letterboxed, aspect kept) into NV12 and hands the planes to `write`.
+    fn convert(&mut self, source: &ID3D11Texture2D, content: SizeInt32, write: impl FnOnce(&[u8], usize)) -> windows::core::Result<()> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { source.GetDesc(&mut desc) };
+        let (cw, ch) = (
+            (content.Width.max(1) as u32).min(desc.Width),
+            (content.Height.max(1) as u32).min(desc.Height),
+        );
+        let (width, height, context) = (self.options.width, self.options.height, &self.gpu.context);
+        match &mut self.path {
+            Path::Gpu(gpu) => {
+                let scale = (width as f64 / cw as f64).min(height as f64 / ch as f64);
+                let (dw, dh) = ((cw as f64 * scale).round() as i32, (ch as f64 * scale).round() as i32);
+                let (dx, dy) = ((width as i32 - dw) / 2, (height as i32 - dh) / 2);
+                let view = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                    FourCC: 0,
+                    ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                    Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                        Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 },
+                    },
+                };
+                let mut input = None;
+                unsafe { gpu.device.CreateVideoProcessorInputView(source, &gpu.enumerator, &view, Some(&mut input)) }?;
+                let stream = D3D11_VIDEO_PROCESSOR_STREAM {
+                    Enable: true.into(),
+                    pInputSurface: std::mem::ManuallyDrop::new(input),
+                    ..Default::default()
+                };
+                let streams = [stream];
+                let result = unsafe {
+                    gpu.video.VideoProcessorSetStreamSourceRect(
+                        &gpu.processor,
+                        0,
+                        true,
+                        Some(&RECT { left: 0, top: 0, right: cw as i32, bottom: ch as i32 }),
+                    );
+                    gpu.video.VideoProcessorSetStreamDestRect(
+                        &gpu.processor,
+                        0,
+                        true,
+                        Some(&RECT { left: dx, top: dy, right: dx + dw, bottom: dy + dh }),
+                    );
+                    gpu.video.VideoProcessorBlt(&gpu.processor, &gpu.output_view, 0, &streams)
+                };
+                let [mut stream] = streams;
+                unsafe { std::mem::ManuallyDrop::drop(&mut stream.pInputSurface) };
+                result?;
+                unsafe { context.CopyResource(&gpu.staging, &gpu.output) };
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                unsafe { context.Map(&gpu.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }?;
+                let pitch = mapped.RowPitch as usize;
+                // NV12 staging: Y rows, then interleaved UV rows, both with the same pitch.
+                let planes = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, pitch * (height as usize * 3 / 2)) };
+                write(planes, pitch);
+                unsafe { context.Unmap(&gpu.staging, 0) };
+            }
+            Path::Cpu { staging, nv12 } => {
+                if !staging.as_ref().is_some_and(|(_, w, h)| (*w, *h) == (desc.Width, desc.Height)) {
+                    *staging = Some((texture(&self.gpu, desc.Width, desc.Height, desc.Format, true)?, desc.Width, desc.Height));
+                }
+                let Some((texture, _, _)) = staging.as_ref() else { unreachable!() };
+                unsafe { context.CopyResource(texture, source) };
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                unsafe { context.Map(texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }?;
+                let pixels = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, (mapped.RowPitch * desc.Height) as usize) };
+                wire::bgra_to_nv12(pixels, cw, ch, mapped.RowPitch, width, height, nv12);
+                unsafe { context.Unmap(texture, 0) };
+                write(nv12, width as usize);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Copies one NV12 frame into its slot between two sequence marks (a seqlock).
+fn publish(mapping: Mapping, width: u32, height: u32, sequence: u32, timestamp: u64, planes: &[u8], pitch: usize) {
+    let slot_size = wire::video_slot_size(width, height);
+    let slot = (sequence % wire::VIDEO_SLOTS) as usize;
+    let base = wire::VIDEO_HEADER + slot * slot_size;
+    assert!(base + slot_size <= mapping.1);
+    let width = width as usize;
+    unsafe {
+        let slot = mapping.0.add(base);
+        std::ptr::write_volatile(slot as *mut u32, sequence);
+        fence(Ordering::SeqCst);
+        std::ptr::write_unaligned(slot.add(8) as *mut u64, timestamp);
+        let mut out = slot.add(wire::VIDEO_SLOT_HEADER);
+        for row in 0..height as usize * 3 / 2 {
+            std::ptr::copy_nonoverlapping(planes.as_ptr().add(row * pitch), out, width);
+            out = out.add(width);
+        }
+        fence(Ordering::SeqCst);
+        std::ptr::write_volatile(slot.add(4) as *mut u32, sequence);
+    }
+}
+
+/// Pacing, frame numbering and the per-second stats shared by both capture loops.
+pub(crate) struct Writer {
+    mapping: Mapping,
+    options: Options,
+    interval: Duration,
+    due: Instant,
+    sequence: u32,
+    window: Instant,
+    written: u32,
+    busy: Duration,
+}
+
+impl Writer {
+    pub fn new(mapping: Mapping, options: Options) -> Self {
+        Self {
+            mapping,
+            options,
+            interval: Duration::from_micros(1_000_000 / options.fps as u64),
+            due: Instant::now(),
+            sequence: 0,
+            window: Instant::now(),
+            written: 0,
+            busy: Duration::ZERO,
+        }
+    }
+
+    /// False when a frame comes too early for the chosen rate; the caller drops it.
+    pub fn due(&mut self) -> bool {
+        let now = Instant::now();
+        if now + Duration::from_millis(2) < self.due {
+            return false;
+        }
+        self.due = (self.due + self.interval).max(now);
+        true
+    }
+
+    /// Time left before the next frame is due.
+    pub fn wait(&self) -> Duration {
+        self.due.saturating_duration_since(Instant::now() + Duration::from_millis(2))
+    }
+
+    /// Converts `source` into the next slot of the shared buffer.
+    pub fn write(
+        &mut self,
+        frames: &Frames,
+        pipeline: &mut Pipeline,
+        source: &ID3D11Texture2D,
+        content: SizeInt32,
+        timestamp: u64,
+    ) -> windows::core::Result<()> {
+        let sequence = self.sequence.wrapping_add(1).max(1);
+        let (mapping, width, height) = (self.mapping, self.options.width, self.options.height);
+        pipeline.convert(source, content, |planes, pitch| publish(mapping, width, height, sequence, timestamp, planes, pitch))?;
+        self.sequence = sequence;
+        let slot = sequence % wire::VIDEO_SLOTS;
+        frames.set(|t| {
+            t.sequence = sequence;
+            t.slot = slot;
+        });
+        Ok(())
+    }
+
+    /// Accounts one written frame; once a second the bench numbers reach the page.
+    pub fn count(&mut self, frames: &Frames, started: Instant) {
+        self.busy += started.elapsed();
+        self.written += 1;
+        if self.window.elapsed() >= Duration::from_secs(1) {
+            let (written, busy) = (self.written, self.busy);
+            frames.set(|t| {
+                t.fps = written;
+                t.busy_ms = busy.as_secs_f32() * 1000.0 / written.max(1) as f32;
+            });
+            (self.window, self.written, self.busy) = (Instant::now(), 0, Duration::ZERO);
+        }
+    }
+}
+
+fn run(
+    frames: &Frames,
+    item: GraphicsCaptureItem,
+    options: Options,
+    mapping: Mapping,
+    ready: mpsc::SyncSender<Result<(), String>>,
+) -> windows::core::Result<()> {
+    let size = item.Size()?;
+    let mut pipeline = Pipeline::new(size, options)?;
+    let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+        &pipeline.gpu.winrt,
+        DirectXPixelFormat::B8G8R8A8UIntNormalized,
+        2,
+        size,
+    )?;
+    let signal = frames.frame_event.0 .0 as isize;
+    // Both handlers hold the raw event handle: they are removed before `frames` can drop it.
+    let arrived = pool.FrameArrived(&TypedEventHandler::new(move |_, _| {
+        unsafe {
+            let _ = SetEvent(HANDLE(signal as *mut _));
+        }
+        Ok(())
+    }))?;
+    let closed = frames.closed.clone();
+    let closing = match item.Closed(&TypedEventHandler::new(move |_, _| {
+        closed.store(true, Ordering::Release);
+        unsafe {
+            let _ = SetEvent(HANDLE(signal as *mut _));
+        }
+        Ok(())
+    })) {
+        Ok(token) => token,
+        Err(e) => {
+            let _ = pool.RemoveFrameArrived(arrived);
+            let _ = pool.Close();
+            return Err(e);
+        }
+    };
+    let result = capture(frames, &item, &pool, &mut pipeline, size, options, mapping, ready);
+    // The item outlives this call inside Windows; a late Closed must not signal a closed handle.
+    let _ = item.RemoveClosed(closing);
+    let _ = pool.RemoveFrameArrived(arrived);
+    let _ = pool.Close();
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture(
+    frames: &Frames,
+    item: &GraphicsCaptureItem,
+    pool: &Direct3D11CaptureFramePool,
+    pipeline: &mut Pipeline,
+    mut size: SizeInt32,
+    options: Options,
+    mapping: Mapping,
+    ready: mpsc::SyncSender<Result<(), String>>,
+) -> windows::core::Result<()> {
+    let session = pool.CreateCaptureSession(item)?;
+    let _ = session.SetIsBorderRequired(false);
+    let _ = session.SetIsCursorCaptureEnabled(options.cursor);
+    // Windows 11 paces the pool itself; older builds rely on the writer's skip.
+    let _ = session.SetMinUpdateInterval(TimeSpan {
+        Duration: 10_000_000 / options.fps as i64,
+    });
+    session.StartCapture()?;
+    frames.running(pipeline.on_gpu());
+    let _ = ready.send(Ok(()));
+    let events = [frames.stop_event.0, frames.frame_event.0];
+    let mut writer = Writer::new(mapping, options);
+    let result = (|| -> windows::core::Result<()> {
+        while !frames.stopping.load(Ordering::Acquire) {
+            let event = unsafe { WaitForMultipleObjects(&events, false, 1000) };
+            if event == WAIT_OBJECT_0 || frames.closed.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if event == WAIT_TIMEOUT {
+                continue;
+            }
+            // Keep only the newest frame; late ones are dropped, never queued.
+            let mut latest = None;
+            while let Ok(frame) = pool.TryGetNextFrame() {
+                if let Some(old) = latest.replace(frame) {
+                    let _ = old.Close();
+                }
+            }
+            let Some(frame) = latest else { continue };
+            if !writer.due() {
+                let _ = frame.Close();
+                continue;
+            }
+            let started = Instant::now();
+            let content = frame.ContentSize()?;
+            let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
+            let source: ID3D11Texture2D = unsafe { access.GetInterface() }?;
+            let timestamp = (frame.SystemRelativeTime()?.Duration / 10) as u64;
+            writer.write(frames, pipeline, &source, content, timestamp)?;
+            let _ = frame.Close();
+            if content.Width != size.Width || content.Height != size.Height {
+                size = content;
+                pool.Recreate(&pipeline.gpu.winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size)?;
+                pipeline.resize(size)?;
+            }
+            writer.count(frames, started);
+        }
+        Ok(())
+    })();
+    let _ = session.Close();
+    result
+}
+
+/// Where a share's frames come from.
+enum Engine {
+    /// Windows 10 screen, Desktop Duplication.
+    Screen(Duplicator),
+    /// Windows 10 window, PrintWindow.
+    Window(WindowCopier),
+    Wgc(GraphicsCaptureItem),
+}
+
+pub struct Stream {
+    frames: Arc<Frames>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+    buffer: Mutex<Option<UiBuffer>>,
+    waiting: AtomicBool,
+}
+
+impl Stream {
+    /// Waits up to 100 ms for a frame newer than `after`; one outstanding wait at a time.
+    pub fn wait(&self, after: u32) -> Result<Tick, String> {
+        if self.waiting.swap(true, Ordering::AcqRel) {
+            return Err("Já existe uma espera de quadro em andamento.".into());
+        }
+        let tick = self.frames.tick.lock().unwrap_or_else(|e| e.into_inner());
+        let (tick, _) = self
+            .frames
+            .changed
+            .wait_timeout_while(tick, Duration::from_millis(100), |t| t.sequence == after && t.state < 2)
+            .unwrap_or_else(|e| e.into_inner());
+        let tick = *tick;
+        self.waiting.store(false, Ordering::Release);
+        Ok(tick)
+    }
+
+    fn stop(&self, app: &AppHandle) {
+        self.frames.stopping.store(true, Ordering::Release);
+        unsafe {
+            let _ = SetEvent(self.frames.stop_event.0);
+        }
+        if let Some(worker) = self.worker.lock().ok().and_then(|mut w| w.take()) {
+            let _ = worker.join();
+        }
+        self.frames.set(|t| t.state = t.state.max(2));
+        // The page keeps its view until it calls releaseBuffer; this frees the host side.
+        if let Some(buffer) = self.buffer.lock().ok().and_then(|mut b| b.take()) {
+            let _ = app.run_on_main_thread(move || {
+                let buffer = buffer; // Capture the Send wrapper, not its field.
+                let _ = unsafe { buffer.0.Close() };
+            });
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Started {
+    capture_id: String,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Default)]
+pub struct StreamManager(Mutex<HashMap<String, Arc<Stream>>>);
+
+fn shared_buffer(window: &WebviewWindow, id: &str, width: u32, height: u32) -> Result<(UiBuffer, Mapping), String> {
+    let failed = || "O aplicativo não conseguiu preparar a imagem. Atualize o WebView2 e tente novamente.".to_string();
+    let size = wire::VIDEO_HEADER + wire::VIDEO_SLOTS as usize * wire::video_slot_size(width, height);
+    let meta = HSTRING::from(format!(r#"{{"vio":"video","captureId":"{id}"}}"#));
+    let (sender, receiver) = mpsc::sync_channel(1);
+    window
+        .with_webview(move |webview| {
+            let result = (|| -> windows::core::Result<(UiBuffer, Mapping)> {
+                let environment: ICoreWebView2Environment12 = webview.environment().cast()?;
+                let buffer = unsafe { environment.CreateSharedBuffer(size as u64) }?;
+                let mut pointer = std::ptr::null_mut();
+                unsafe { buffer.Buffer(&mut pointer) }?;
+                let header = wire::video_header(width, height);
+                unsafe { std::ptr::copy_nonoverlapping(header.as_ptr(), pointer, header.len()) };
+                let core: ICoreWebView2_17 = unsafe { webview.controller().CoreWebView2() }?.cast()?;
+                unsafe { core.PostSharedBufferToScript(&buffer, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_ONLY, &meta) }?;
+                Ok((UiBuffer(buffer), Mapping(pointer, size)))
+            })();
+            let _ = sender.send(result);
+        })
+        .map_err(|_| failed())?;
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| failed())?
+        .map_err(|_| failed())
+}
+
+impl StreamManager {
+    /// Blocking: call from a worker thread, never from the UI thread.
+    pub fn start(&self, window: &WebviewWindow, source_id: &str, mut options: Options) -> Result<Started, String> {
+        if !matches!(options.fps, 15 | 30 | 60) {
+            return Err("Escolha 15, 30 ou 60 quadros por segundo.".into());
+        }
+        // One more than the limit: a swap starts the new image before the old one stops.
+        if self.0.lock().map_err(|_| "A captura está indisponível.")?.len() > MAX_STREAMS {
+            return Err("Você já transmite 3 telas. Encerre uma para compartilhar outra.".into());
+        }
+        let app = window.app_handle().clone();
+        let videos = app.state::<VideoManager>();
+        let (source_width, source_height) = videos.size(source_id)?;
+        (options.width, options.height) = wire::fit(
+            source_width,
+            source_height,
+            options.width.clamp(2, MAX_WIDTH),
+            options.height.clamp(2, MAX_HEIGHT),
+        );
+        let id = key()?;
+        let (buffer, mapping) = shared_buffer(window, &id, options.width, options.height)?;
+        let unavailable = || "Não foi possível iniciar a captura da imagem.".to_string();
+        let frames = Arc::new(Frames {
+            tick: Mutex::new(Tick::default()),
+            changed: Condvar::new(),
+            stopping: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
+            stop_event: Owned(unsafe { CreateEventW(None, true, false, None) }.map_err(|_| unavailable())?),
+            frame_event: Owned(unsafe { CreateEventW(None, false, false, None) }.map_err(|_| unavailable())?),
+        });
+        let (ready, started) = mpsc::sync_channel(1);
+        let worker_frames = frames.clone();
+        let worker_app = app.clone();
+        let source = source_id.to_string();
+        let worker = std::thread::spawn(move || {
+            let frames = worker_frames;
+            let _apartment = Apartment::enter();
+            let videos = worker_app.state::<VideoManager>();
+            // Windows 10 screens go through Desktop Duplication and windows through
+            // PrintWindow (no yellow border); any failure to set them up falls back to WGC.
+            let engine = match (videos.monitor(&source), videos.gdi_window(&source)) {
+                (Ok(Some(monitor)), _) if duplication::wanted() => Duplicator::open(monitor, options)
+                    .inspect_err(|e| log::write("duplication", &format!("{:#010x}", e.code().0)))
+                    .ok()
+                    .map(Engine::Screen),
+                (Ok(_), Ok(Some(window))) => WindowCopier::open(window, options)
+                    .inspect_err(|e| log::write("printwindow", &format!("{:#010x}", e.code().0)))
+                    .ok()
+                    .map(Engine::Window),
+                (Err(message), _) | (_, Err(message)) => {
+                    frames.set(|t| t.state = 3);
+                    let _ = ready.send(Err(message));
+                    return;
+                }
+                _ => None,
+            };
+            let engine = match engine {
+                Some(engine) => engine,
+                None => {
+                    borderless();
+                    match videos.item(&source) {
+                        Ok(item) => Engine::Wgc(item),
+                        Err(message) => {
+                            frames.set(|t| t.state = 3);
+                            let _ = ready.send(Err(message));
+                            return;
+                        }
+                    }
+                }
+            };
+            let failed = ready.clone();
+            // A panic ends this capture only; the page sees state 3 and ends the share.
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| match engine {
+                Engine::Screen(duplicator) => duplicator.run(&frames, options, mapping, ready),
+                Engine::Window(copier) => copier.run(&frames, options, mapping, ready),
+                Engine::Wgc(item) => run(&frames, item, options, mapping, ready),
+            }));
+            match result {
+                Ok(Ok(())) => frames.set(|t| t.state = t.state.max(2)),
+                failure => {
+                    if let Ok(Err(e)) = &failure {
+                        log::write("video", &format!("{}x{}@{} {:#010x}", options.width, options.height, options.fps, e.code().0));
+                    }
+                    frames.set(|t| t.state = 3);
+                    let _ = failed.send(Err("O Windows interrompeu a captura da imagem.".into()));
+                }
+            }
+        });
+        let stream = Arc::new(Stream {
+            frames,
+            worker: Mutex::new(Some(worker)),
+            buffer: Mutex::new(Some(buffer)),
+            waiting: AtomicBool::new(false),
+        });
+        match started.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => {}
+            failure => {
+                stream.stop(&app);
+                return Err(failure.ok().and_then(Result::err).unwrap_or_else(unavailable));
+            }
+        }
+        self.0.lock().map_err(|_| unavailable())?.insert(id.clone(), stream);
+        Ok(Started {
+            capture_id: id,
+            width: options.width,
+            height: options.height,
+        })
+    }
+
+    pub fn stream(&self, id: &str) -> Result<Arc<Stream>, String> {
+        self.0
+            .lock()
+            .map_err(|_| "A captura está indisponível.")?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "A captura já foi encerrada.".into())
+    }
+
+    /// Blocking (joins the worker): call from a worker thread. `None` stops all.
+    pub fn stop(&self, app: &AppHandle, id: Option<&str>) {
+        let streams: Vec<_> = match self.0.lock() {
+            Ok(mut map) => match id {
+                Some(id) => map.remove(id).into_iter().collect(),
+                None => map.drain().map(|(_, s)| s).collect(),
+            },
+            Err(_) => Vec::new(),
+        };
+        for stream in streams {
+            stream.stop(app);
+        }
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use windows::Win32::{
+        Foundation::{FILETIME, HWND, POINT},
+        Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY},
+        System::{
+            Threading::{GetCurrentProcess, GetProcessTimes},
+            WinRT::Graphics::Capture::IGraphicsCaptureItemInterop,
+        },
+    };
+
+    fn cpu() -> Duration {
+        let [mut a, mut b, mut kernel, mut user] = [FILETIME::default(); 4];
+        unsafe {
+            let _ = GetProcessTimes(GetCurrentProcess(), &mut a, &mut b, &mut kernel, &mut user);
+        }
+        let ticks = |t: FILETIME| ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64;
+        Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+    }
+
+    /// Primary screen → NV12 → shared memory, without the WebView: WGC and Desktop
+    /// Duplication (#247) at 1080p60 and 720p30, 6 s each. The runner's screen is static
+    /// and has no GPU, so this is a ceiling; real numbers come from the user's PC.
+    /// `cargo test --release -- --ignored --nocapture native_capture_cpu`
+    #[test]
+    #[ignore]
+    fn native_capture_cpu() {
+        let _apartment = Apartment::enter();
+        let monitor = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
+        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().unwrap();
+        let screen = item_size();
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
+        for options in [
+            Options { width: 1920, height: 1080, fps: 60, cursor: true },
+            Options { width: 1280, height: 720, fps: 30, cursor: true },
+        ] {
+            for engine in ["WGC", "DXGI"] {
+                let size = SizeInt32 { Width: screen.0, Height: screen.1 };
+                let on_gpu = Pipeline::new(size, options).unwrap_or_else(|e| panic!("D3D11: {e:?}")).on_gpu();
+                let running = if engine == "WGC" {
+                    Running::start(unsafe { interop.CreateForMonitor::<GraphicsCaptureItem>(monitor) }.unwrap(), options)
+                } else {
+                    let handle = monitor.0 as isize;
+                    let spawned = Running::spawn(options, move |frames, mapping, ready| {
+                        Duplicator::open(HMONITOR(handle as *mut _), options)?.run(frames, options, mapping, ready)
+                    });
+                    match spawned {
+                        Ok(running) => running,
+                        Err(e) => {
+                            println!("VIO bench (DXGI): indisponível neste PC ({e})");
+                            continue;
+                        }
+                    }
+                };
+                let (cpu0, wall0) = (cpu(), Instant::now());
+                let mut samples = Vec::new();
+                while wall0.elapsed() < Duration::from_secs(6) {
+                    std::thread::sleep(Duration::from_secs(1));
+                    samples.push(*running.frames.tick.lock().unwrap());
+                }
+                let (used, wall) = (cpu() - cpu0, wall0.elapsed());
+                running.stop();
+                let share = used.as_secs_f64() / wall.as_secs_f64() * 100.0;
+                println!(
+                    "VIO bench ({engine}, {}): tela {}x{} -> {}x{}@{} | CPU {share:.1}% de um núcleo ({:.1}% do PC, {cores} núcleos) | quadros/s {:?} | ms/quadro {:?}",
+                    if on_gpu { "conversão na GPU" } else { "conversão na CPU" },
+                    screen.0,
+                    screen.1,
+                    options.width,
+                    options.height,
+                    options.fps,
+                    share / cores,
+                    samples.iter().map(|t| t.fps).collect::<Vec<_>>(),
+                    samples.iter().map(|t| (t.busy_ms * 10.0).round() / 10.0).collect::<Vec<_>>(),
+                );
+            }
+        }
+    }
+
+    /// #247: a window drawn by PrintWindow (the Windows 10 path) at 720p30 and 1080p60,
+    /// 6 s each. The window is a plain one of this test, with its own message loop; a
+    /// browser costs more, so real numbers come from the user's PC.
+    /// `cargo test --release -- --ignored --nocapture window_capture_cpu`
+    #[test]
+    #[ignore]
+    fn window_capture_cpu() {
+        use windows::{
+            core::w,
+            Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG,
+                WINDOW_EX_STYLE, WM_QUIT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            },
+            Win32::System::Threading::GetCurrentThreadId,
+        };
+        let (sender, receiver) = mpsc::channel();
+        let pump = std::thread::spawn(move || unsafe {
+            let window = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("VIO bench: janela de teste com algum texto para desenhar"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                40,
+                40,
+                1280,
+                720,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("janela");
+            sender.send((window.0 as isize, GetCurrentThreadId())).unwrap();
+            let mut message = MSG::default();
+            while GetMessageW(&mut message, None, 0, 0).as_bool() {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            let _ = DestroyWindow(window);
+        });
+        let (handle, thread) = receiver.recv().unwrap();
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
+        for options in [
+            Options { width: 1280, height: 720, fps: 30, cursor: true },
+            Options { width: 1920, height: 1080, fps: 60, cursor: true },
+        ] {
+            let running = Running::spawn(options, move |frames, mapping, ready| {
+                WindowCopier::open(HWND(handle as *mut _), options)?.run(frames, options, mapping, ready)
+            })
+            .expect("captura da janela não iniciou");
+            let (cpu0, wall0) = (cpu(), Instant::now());
+            let mut samples = Vec::new();
+            while wall0.elapsed() < Duration::from_secs(6) {
+                std::thread::sleep(Duration::from_secs(1));
+                samples.push(*running.frames.tick.lock().unwrap());
+            }
+            let (used, wall) = (cpu() - cpu0, wall0.elapsed());
+            running.stop();
+            let share = used.as_secs_f64() / wall.as_secs_f64() * 100.0;
+            println!(
+                "VIO bench (PrintWindow): janela 1280x720 -> {}x{}@{} | CPU {share:.1}% de um núcleo ({:.1}% do PC, {cores} núcleos) | quadros/s {:?} | ms/quadro {:?}",
+                options.width,
+                options.height,
+                options.fps,
+                share / cores,
+                samples.iter().map(|t| t.fps).collect::<Vec<_>>(),
+                samples.iter().map(|t| (t.busy_ms * 10.0).round() / 10.0).collect::<Vec<_>>(),
+            );
+        }
+        unsafe {
+            let _ = PostThreadMessageW(thread, WM_QUIT, Default::default(), Default::default());
+        }
+        pump.join().unwrap();
+    }
+
+    struct Running {
+        frames: Arc<Frames>,
+        worker: JoinHandle<Result<(), String>>,
+        _memory: Vec<u8>,
+    }
+
+    impl Running {
+        fn start(item: GraphicsCaptureItem, options: Options) -> Self {
+            Self::spawn(options, move |frames, mapping, ready| run(frames, item, options, mapping, ready)).expect("captura não iniciou")
+        }
+
+        fn spawn(
+            options: Options,
+            body: impl FnOnce(&Frames, Mapping, mpsc::SyncSender<Result<(), String>>) -> windows::core::Result<()> + Send + 'static,
+        ) -> Result<Self, String> {
+            let size = wire::VIDEO_HEADER + wire::VIDEO_SLOTS as usize * wire::video_slot_size(options.width, options.height);
+            let mut memory = vec![0u8; size];
+            let mapping = Mapping(memory.as_mut_ptr(), size);
+            let frames = Arc::new(Frames {
+                tick: Mutex::new(Tick::default()),
+                changed: Condvar::new(),
+                stopping: AtomicBool::new(false),
+                closed: Arc::new(AtomicBool::new(false)),
+                stop_event: Owned(unsafe { CreateEventW(None, true, false, None) }.unwrap()),
+                frame_event: Owned(unsafe { CreateEventW(None, false, false, None) }.unwrap()),
+            });
+            let worker_frames = frames.clone();
+            let (ready, started) = mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                let _apartment = Apartment::enter();
+                body(&worker_frames, mapping, ready).map_err(|e| format!("{e:?}"))
+            });
+            match started.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(())) => Ok(Self { frames, worker, _memory: memory }),
+                other => Err(format!("{other:?} / {:?}", worker.join())),
+            }
+        }
+
+        fn sequence(&self) -> u32 {
+            self.frames.tick.lock().unwrap().sequence
+        }
+
+        /// Pumps the test window's messages until a frame newer than `after` arrives.
+        fn frame_after(&self, after: u32) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                pump();
+                if self.sequence() > after {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        }
+
+        fn stop(self) {
+            self.frames.stopping.store(true, Ordering::Release);
+            unsafe {
+                let _ = SetEvent(self.frames.stop_event.0);
+            }
+            self.worker.join().expect("a captura entrou em pânico").expect("a captura falhou");
+        }
+    }
+
+    fn pump() {
+        use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
+        let mut message = MSG::default();
+        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+    }
+
+    /// #246: screen → window → screen, the new capture starting before the old one stops
+    /// (as "Trocar" does), plus a window resized mid-share, at 1080p60 and 720p30.
+    /// `cargo test --release -- --ignored --nocapture native_swap`
+    #[test]
+    #[ignore]
+    fn native_swap() {
+        use windows::{
+            core::w,
+            Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, SetWindowPos, SWP_NOMOVE, SWP_NOZORDER, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+                WS_VISIBLE,
+            },
+        };
+        let _apartment = Apartment::enter();
+        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().unwrap();
+        let screen = || {
+            let monitor = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
+            unsafe { interop.CreateForMonitor::<GraphicsCaptureItem>(monitor) }.unwrap()
+        };
+        let window = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("VIO troca"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                100,
+                100,
+                640,
+                360,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        pump();
+        // Each resize must change the size, or Windows sends no new frame.
+        let sizes = [(900, 520), (500, 700), (760, 430)];
+        let mut resizes = 0usize;
+        let target = || unsafe { interop.CreateForWindow::<GraphicsCaptureItem>(window) }.unwrap();
+        for options in [
+            Options { width: 1920, height: 1080, fps: 60, cursor: true },
+            Options { width: 1280, height: 720, fps: 30, cursor: false },
+        ] {
+            for round in 0..3 {
+                let first = Running::start(screen(), options);
+                assert!(first.frame_after(0), "tela sem quadros ({round})");
+                let second = Running::start(target(), options);
+                assert!(second.frame_after(0), "janela sem quadros ({round})");
+                first.stop();
+                let before = second.sequence();
+                let (w, h) = sizes[resizes % sizes.len()];
+                resizes += 1;
+                unsafe { SetWindowPos(window, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER) }.unwrap();
+                assert!(second.frame_after(before), "janela redimensionada parou ({round})");
+                let third = Running::start(screen(), options);
+                assert!(third.frame_after(0), "tela de volta sem quadros ({round})");
+                second.stop();
+                third.stop();
+            }
+            println!("VIO troca: {}x{}@{} ok", options.width, options.height, options.fps);
+        }
+        unsafe {
+            let _ = DestroyWindow(window);
+        }
+    }
+
+    fn item_size() -> (i32, i32) {
+        let monitor = unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) };
+        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().unwrap();
+        let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor) }.unwrap();
+        item.Size().map(|s| (s.Width, s.Height)).unwrap_or_default()
+    }
+}

@@ -1,0 +1,163 @@
+/* Add widget (#222): tabs by intent, actions on each item. */
+.catalog .catalog-tabs {
+  display: flex;
+  gap: 2px;
+  margin: 0;
+  border-bottom: 1px solid #2a2c3c;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.catalog .catalog-tabs button {
+  flex: none;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: #a3a7c2;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.catalog .catalog-tabs button:hover {
+  color: #fff;
+}
+.catalog .catalog-tabs button[aria-selected="true"] {
+  border-bottom-color: #a6a9ff;
+  background: none;
+  color: #fff;
+}
+.catalog .catalog-tabs button:focus-visible {
+  outline: 2px solid #a6a9ff;
+  outline-offset: -2px;
+}
+.catalog-results.is-rows {
+  display: grid;
+  gap: 6px;
+}
+.catalog .catalog-item.is-row {
+  align-items: center;
+  width: 100%;
+}
+.catalog .catalog-item.is-row .catalog-text {
+  flex: 1;
+}
+.catalog-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+.catalog-actions :is(.primary, .secondary) {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 12px;
+  gap: 4px;
+}
+div.catalog-item:hover {
+  border-color: #33355a;
+  background: #141a2b;
+}
+.catalog-room {
+  align-self: flex-start;
+  gap: 8px;
+  margin-top: 4px;
+}
+.catalog-room .mono {
+  font-family: var(--mono);
+  color: #a6a9ff;
+}
+.catalog-back {
+  align-self: flex-start;
+  gap: 8px;
+}
+/* In-slot tiles: icon + short name, Mim / Sala under it. */
+.catalog.is-compact .catalog-tabs button {
+  min-height: 28px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+.catalog.is-compact .catalog-results.is-icons .catalog-item.is-tile {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 40px;
+  padding: 6px 2px;
+}
+.catalog-item.is-tile .catalog-actions {
+  gap: 2px;
+}
+.catalog-item.is-tile .catalog-actions :is(.primary, .secondary) {
+  min-height: 22px;
+  padding: 2px 5px;
+  font-size: 10px;
+  border-radius: 6px;
+}
+.catalog.is-compact > :is(.catalog-search, .catalog-tabs) {
+  flex: none;
+}
+/* #254: the scope buttons never push the tile wider than its column. */
+.catalog-item.is-tile {
+  min-width: 0;
+}
+.catalog-item.is-tile .catalog-actions {
+  max-width: 100%;
+}
+.catalog-item.is-tile .catalog-actions svg {
+  display: none;
+}
+@container (max-width: 339px) {
+  .catalog.is-compact {
+    grid-auto-rows: max-content;
+  }
+  .catalog.is-compact .catalog-tabs {
+    grid-column: 1 / -1;
+  }
+  .catalog-results.is-icons {
+    grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+  }
+  .catalog-item.is-tile .catalog-actions svg {
+    display: block;
+  }
+  .catalog-item.is-tile .catalog-actions .catalog-scope-label {
+    display: none;
+  }
+  .catalog-item.is-tile .catalog-actions :is(.primary, .secondary) {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0;
+    justify-content: center;
+  }
+}
+/* #254: what the community tab will hold. */
+.catalog-community {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px;
+  border: 1px dashed #33355a;
+  border-radius: 10px;
+  color: #a6a9ff;
+}
+.catalog-community svg {
+  flex: none;
+}
+.catalog-community p {
+  margin: 0;
+  color: #c5cde5;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.catalog-community strong {
+  color: #fff;
+  font-weight: 600;
+}
+.catalog.is-compact .catalog-community {
+  gap: 8px;
+  padding: 8px;
+}
+.catalog.is-compact .catalog-community p {
+  font-size: 12px;
+  line-height: 1.4;
+}

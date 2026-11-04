@@ -3,6 +3,8 @@ import {
   trimMessages,
   type ChatMessageEvent,
   type SharedWidget,
+  type WidgetClosed,
+  type WidgetUpdatedEvent,
 } from "../../shared/widgets";
 import { io, type Socket } from "socket.io-client";
 import type {
@@ -13,15 +15,29 @@ import type {
   Reply,
   RuntimeConfig,
   Snapshot,
+  JoinResult,
+  Admission,
+  InviteResult,
+  InviteTtl,
+  WaitingPerson,
   Subscription,
   Tier,
   VideoDemand,
 } from "../../shared/protocol";
-import { Captures, mediaError, type CaptureAdapter } from "../media/capture";
+import {
+  Captures,
+  mediaError,
+  slotKind,
+  type CaptureAdapter,
+  type LocalSource,
+  type Slot,
+} from "../media/capture";
 import { Peers } from "../media/peers";
 import { SoundCues } from "../media/sounds";
 import {
+  readBalloons,
   readSoundEvents,
+  type Motion,
   volumePreference,
   type Cue,
 } from "../media/sound-preferences";
@@ -47,6 +63,25 @@ export interface View {
   error: string;
   notice: string;
   signalingPing?: number;
+  /** At the door of a locked room until someone admits us (#242). */
+  waiting?: { expiresAt: number };
+  /** People waiting to enter; only sent to the creator and admins. */
+  knocks: WaitingPerson[];
+}
+const cameraOff: VideoDemand = { video: "off", height: 120 };
+/** A screen slot with sound and no image is published as a named sound (#236). */
+function soundOnly({ kind, stream, label }: LocalSource) {
+  if (
+    kind !== "screen" ||
+    stream.getVideoTracks().length ||
+    !stream.getAudioTracks().length
+  )
+    return {};
+  const name = label
+    ?.replace(/[\p{Cc}\p{Cf}]/gu, "")
+    .trim()
+    .slice(0, 60);
+  return { audioOnly: true, ...(name && { label: name }) };
 }
 export class Controller {
   view: View = {
@@ -58,6 +93,7 @@ export class Controller {
     watching: [],
     error: "",
     notice: "",
+    knocks: [],
   };
   readonly canvas: CanvasStore;
   readonly chatRead = new Map<string, number>();
@@ -67,6 +103,10 @@ export class Controller {
     this.bump();
   }
   watchRequest?: (id: string, together: boolean, single?: boolean) => boolean;
+  /** Opens (or brings) the Cameras widget pinned on this person (#162). */
+  cameraRequest?: (personId: string) => void;
+  /** Runs before a room widget closed for everyone leaves the snapshot. */
+  widgetClosed?: (widget: SharedWidget, closed: WidgetClosed) => void;
   private desiredVideo = new Map<string, VideoDemand>();
   private sentVideo = new Map<string, string>();
   config?: RuntimeConfig;
@@ -83,11 +123,19 @@ export class Controller {
     this.savePreferences();
   });
   private unwatchOutput?: () => void;
-  publications = new Map<Kind, Publication>();
+  publications = new Map<Slot, Publication>();
   visiblePreviews = new Set<string>();
   private listeners = new Set<() => void>();
   private session?: { token: string; id: string; expiresAt: number };
-  private intent?: { name: string; code?: string; color?: string };
+  private intent?: {
+    name: string;
+    code?: string;
+    color?: string;
+    /** Signed invite (#242): enters even a locked room. */
+    invite?: string;
+  };
+  /** Signed creator seats by room code (#226); survive a server restart. */
+  private credentials: Record<string, string> = {};
   private roomEntered = false;
   roomColor = defaultColor;
   /** The color chosen last, kept on this device and applied when entering a room. */
@@ -123,7 +171,8 @@ export class Controller {
   masterVolume = 1;
   participantColors = true;
   previewsEnabled = false;
-  remoteMute = false;
+  balloons = readBalloons(undefined);
+  motion: Motion = "system";
   screenVolume = 0.8;
   volumes = new Map<string, number>();
   /** Volume to restore when "Silenciar para mim" is undone. */
@@ -196,6 +245,8 @@ export class Controller {
         this.peopleHidden = p.peopleHidden === true;
         this.fineAudio = p.fineAudio === true && this.playback.supported;
         this.previewsEnabled = p.previewsEnabled === true;
+        this.balloons = readBalloons(p.balloons);
+        this.motion = p.motion === "reduce" ? "reduce" : "system";
         this.savedColor =
           (typeof p.color === "string" && normalizeColor(p.color)) || "";
         if (this.output.supported && typeof p.outputDevice === "string")
@@ -261,6 +312,8 @@ export class Controller {
             peopleHidden: this.peopleHidden,
             fineAudio: this.fineAudio,
             previewsEnabled: this.previewsEnabled,
+            balloons: this.balloons,
+            motion: this.motion,
             color: this.savedColor || undefined,
             outputDevice: this.output.pendingDeviceId || this.output.deviceId,
             manualGain: this.captures.manualGain,
@@ -362,6 +415,30 @@ export class Controller {
     }
     return this.session!;
   }
+  private loadCredentials() {
+    if (this.persist)
+      try {
+        const stored = JSON.parse(
+          localStorage.getItem("vio:room-credentials") || "{}",
+        );
+        if (stored && typeof stored === "object") this.credentials = stored;
+      } catch {}
+    return this.credentials;
+  }
+  private storeCredential(code: string, credential: string | null) {
+    const all = { ...this.loadCredentials() };
+    delete all[code];
+    if (credential) all[code] = credential;
+    // Most recent last; a handful of rooms is plenty.
+    this.credentials = Object.fromEntries(Object.entries(all).slice(-20));
+    if (this.persist)
+      try {
+        localStorage.setItem(
+          "vio:room-credentials",
+          JSON.stringify(this.credentials),
+        );
+      } catch {}
+  }
   private storeSession() {
     if (this.persist)
       try {
@@ -408,7 +485,12 @@ export class Controller {
         );
     });
   }
-  async enter(name: string, code?: string, recovering = false) {
+  async enter(
+    name: string,
+    code?: string,
+    recovering = false,
+    invite?: string,
+  ) {
     const previousAttempts = recovering ? this.recoveryAttempt : 0;
     if (this.disposed) return;
     if (this.intent || this.socket) void this.leave();
@@ -422,6 +504,7 @@ export class Controller {
       name,
       code: code?.trim().toUpperCase() || undefined,
       color: this.roomColor,
+      ...(invite && { invite }),
     };
     this.recoveryAttempt = previousAttempts;
     if (typeof window !== "undefined") {
@@ -518,6 +601,35 @@ export class Controller {
         if (!current()) return;
         this.scheduleRecovery();
       });
+      socket.on("room-credential", (credential: string | null) => {
+        const code = this.intent?.code;
+        if (
+          current() &&
+          code &&
+          (credential === null || typeof credential === "string")
+        )
+          this.storeCredential(code, credential);
+      });
+      socket.on("waiting", (event: { expiresAt: number }) => {
+        if (!current() || !Number.isFinite(event?.expiresAt)) return;
+        this.view.waiting = { expiresAt: event.expiresAt };
+        this.bump();
+      });
+      socket.on("admission", (event: Admission) => {
+        if (!current() || !this.view.waiting) return;
+        this.view.waiting = undefined;
+        if (event?.allowed) void this.rejoin();
+        else {
+          this.view.status = "failed";
+          this.view.error = event?.message || "Sua entrada não foi aceita.";
+          this.bump();
+        }
+      });
+      socket.on("waiting-list", (list: WaitingPerson[]) => {
+        if (!current() || !Array.isArray(list)) return;
+        this.view.knocks = list;
+        this.bump();
+      });
       socket.on("snapshot", (snapshot: Snapshot) =>
         this.receiveSnapshot(snapshot),
       );
@@ -526,29 +638,28 @@ export class Controller {
         this.view.snapshot = { ...this.view.snapshot, screenViewers };
         this.bump();
       });
-      socket.on(
-        "widget-updated",
-        (event: { id: string; widget: SharedWidget | null }) => {
-          if (!current() || !this.view.snapshot) return;
-          const before = this.view.snapshot.widgets?.find(
-            (w) => w.id === event.id,
-          );
-          const last = event.widget?.messages?.at(-1);
-          if (
-            before &&
-            last &&
-            last.authorId !== this.view.id &&
-            last.id !== before.messages?.at(-1)?.id
-          )
-            this.chatCue();
-          const widgets = (this.view.snapshot.widgets || []).filter(
-            (w) => w.id !== event.id,
-          );
-          if (event.widget) widgets.push(event.widget);
-          this.view.snapshot = { ...this.view.snapshot, widgets };
-          this.bump();
-        },
-      );
+      socket.on("widget-updated", (event: WidgetUpdatedEvent) => {
+        if (!current() || !this.view.snapshot) return;
+        const before = this.view.snapshot.widgets?.find(
+          (w) => w.id === event.id,
+        );
+        if (before && !event.widget && event.closed)
+          this.widgetClosed?.(before, event.closed);
+        const last = event.widget?.messages?.at(-1);
+        if (
+          before &&
+          last &&
+          last.authorId !== this.view.id &&
+          last.id !== before.messages?.at(-1)?.id
+        )
+          this.chatCue();
+        const widgets = (this.view.snapshot.widgets || []).filter(
+          (w) => w.id !== event.id,
+        );
+        if (event.widget) widgets.push(event.widget);
+        this.view.snapshot = { ...this.view.snapshot, widgets };
+        this.bump();
+      });
       socket.on("chat-message", (event: ChatMessageEvent) => {
         if (!current() || !this.view.snapshot) return;
         const chat = this.view.snapshot.widgets?.find((w) => w.id === event.id);
@@ -666,7 +777,13 @@ export class Controller {
       if (newSession) await this.newSession();
       else if (this.socket?.connected) await this.rejoin();
       else if (this.socket) this.socket.connect();
-      else await this.enter(this.intent.name, this.intent.code, true);
+      else
+        await this.enter(
+          this.intent.name,
+          this.intent.code,
+          true,
+          this.intent.invite,
+        );
     } catch (e) {
       this.scheduleRecovery(e);
     }
@@ -684,12 +801,16 @@ export class Controller {
       socket === this.socket &&
       !!this.intent;
     try {
-      const result = await this.request<{ id: string; snapshot: Snapshot }>(
-        "join",
-        this.intent,
-      );
+      const code = this.intent.code;
+      const credential = code ? this.loadCredentials()[code] : undefined;
+      const result = await this.request<JoinResult>("join", {
+        ...this.intent,
+        ...(credential && { credential }),
+      });
       if (!current() || !this.intent) return;
       this.intent.code = result.snapshot.code;
+      if (result.credential)
+        this.storeCredential(result.snapshot.code, result.credential);
       this.view.id = result.id;
       this.view.status = "connected";
       void this.heartbeat();
@@ -724,8 +845,30 @@ export class Controller {
       }
     } catch (e) {
       if (!current()) return;
+      // Locked room: stay connected and wait for the "admission" event.
+      if (recoveryCode(e) === "WAITING") {
+        this.view.waiting ||= { expiresAt: Date.now() + 5 * 60000 };
+        this.bump();
+        return;
+      }
       this.scheduleRecovery(e);
     }
+  }
+  /** Locks or unlocks the room; creator and admins only (#242). */
+  setLocked(locked: boolean) {
+    return this.request("room-permissions", { permissions: { locked } });
+  }
+  /** Lets someone from the waiting room in, or turns them away. */
+  admit(id: string, allow: boolean) {
+    return this.request("admit", { id, allow });
+  }
+  /** Signed invite that enters directly, even when the room is locked. */
+  createInvite(ttl: InviteTtl) {
+    return this.request<InviteResult>("invite-create", { ttl });
+  }
+  /** Every invite issued so far stops working (until a server restart). */
+  revokeInvites() {
+    return this.request("invite-revoke");
   }
   private receiveSnapshot(snapshot: Snapshot, announce = true) {
     if (
@@ -790,7 +933,8 @@ export class Controller {
     this.captures.micMuted = true;
     if (this.captures.sources.has("voice")) this.captures.stop("voice");
   }
-  private async syncCapture(kind: Kind, ended = false) {
+  private async syncCapture(slot: Slot, ended = false) {
+    const kind = slotKind(slot);
     if (this.view.status !== "connected") return;
     if (
       kind === "voice" &&
@@ -801,16 +945,16 @@ export class Controller {
       this.releaseBlockedVoice();
       return;
     }
-    if (kind !== "screen" && !this.inCall && this.captures.sources.has(kind)) {
-      this.captures.stop(kind);
+    if (kind !== "screen" && !this.inCall && this.captures.sources.has(slot)) {
+      this.captures.stop(slot);
       return;
     }
     const generation = this.generation;
-    const source = this.captures.sources.get(kind);
-    const previous = this.publications.get(kind);
+    const source = this.captures.sources.get(slot);
+    const previous = this.publications.get(slot);
     if (!source || ended) {
       if (previous) {
-        this.publications.delete(kind);
+        this.publications.delete(slot);
         this.peers.closePublication(previous.id);
         await this.request("unpublish", { publicationId: previous.id }).catch(
           () => {},
@@ -831,6 +975,24 @@ export class Controller {
           m.publications.some((p) => p.id === previous.id),
       )
     ) {
+      const audio = source.stream.getAudioTracks().length > 0;
+      if (previous.audio !== audio) {
+        // Same key: the server updates the existing publication in place.
+        const updated = await this.request<Publication>("publish", {
+          kind,
+          key: source.key,
+          audio,
+          ...soundOnly(source),
+          // Screen "muted" is the paused video, which the replacement keeps.
+          muted:
+            kind === "screen"
+              ? source.stream.getVideoTracks()[0]?.enabled === false
+              : previous.muted,
+        });
+        previous.audio = updated.audio;
+        previous.audioOnly = updated.audioOnly;
+        previous.label = updated.label;
+      }
       if (previous.muted !== muted) {
         await this.request("state", { publicationId: previous.id, muted });
         previous.muted = muted;
@@ -845,21 +1007,28 @@ export class Controller {
         kind,
         key: source.key,
         audio: source.stream.getAudioTracks().length > 0,
+        ...soundOnly(source),
         muted,
       });
     } catch (e) {
+      // Past MAX_SCREENS the capture would only burn CPU: let it go (#194).
+      if (recoveryCode(e) === "SCREEN_LIMIT") {
+        if (this.captures.sources.get(slot) === source)
+          this.captures.stop(slot);
+        throw e;
+      }
       // Blocked before our snapshot said so: same outcome, no error loop.
       if (recoveryCode(e) !== "VOICE_BLOCKED") throw e;
-      if (this.captures.sources.get(kind) === source)
+      if (this.captures.sources.get(slot) === source)
         this.releaseBlockedVoice();
       return;
     }
     if (
       generation !== this.generation ||
-      this.captures.sources.get(kind) !== source
+      this.captures.sources.get(slot) !== source
     )
       return;
-    this.publications.set(kind, publication);
+    this.publications.set(slot, publication);
     await this.peers.update(kind);
     if (!previous && kind === "screen") this.chime(true);
     this.bump();
@@ -1029,9 +1198,12 @@ export class Controller {
   private async flushVideoDemands() {
     if (!this.socket?.connected) return;
     for (const info of this.peers.infos()) {
-      if (info.sending || info.kind !== "screen" || info.tier !== "main")
+      if (info.sending || info.kind === "voice" || info.tier !== "main")
         continue;
-      const demand = this.desiredVideo.get(info.publicationId);
+      // A camera nobody shows (no Cameras widget, hidden tile) costs no upload.
+      const demand =
+        this.desiredVideo.get(info.publicationId) ||
+        (info.kind === "camera" ? cameraOff : undefined);
       if (!demand) continue;
       const key = JSON.stringify(demand);
       if (this.sentVideo.get(info.id) === key) continue;
@@ -1181,15 +1353,23 @@ export class Controller {
       if (this.reconciling === generation) this.reconciling = undefined;
     }
   }
-  async startScreen(audio: boolean) {
+  /**
+   * `replace` swaps what is shared without ending the publication viewers watch.
+   * Another screen (#194): `startScreen(audio, false, engine.captures.nextScreen())`.
+   */
+  async startScreen(audio: boolean, replace = false, slot: Slot = "screen") {
     const generation = this.generation;
     if (this.sounds) this.cues.unlock();
     try {
-      await this.captures.startScreen(audio);
+      await this.captures.startScreen(audio, replace, slot);
       await this.captureQueue;
     } catch (e) {
       if (generation === this.generation) this.fail(e);
     }
+  }
+  setScreenAudioMuted(muted: boolean, slot: Slot = "screen") {
+    this.captures.setScreenAudioMuted(muted, slot);
+    this.bump();
   }
   async microphone() {
     if (!this.inCall || this.voicePending || this.voiceBlocked) return;
@@ -1242,12 +1422,12 @@ export class Controller {
       if (generation === this.callGeneration) this.cameraPending = false;
     }
   }
-  async stop(kind: Kind) {
-    this.captures.stop(kind);
+  async stop(slot: Slot) {
+    this.captures.stop(slot);
     await this.captureQueue;
   }
-  async quality(q: typeof this.captures.quality) {
-    await this.captures.applyQuality(q);
+  async quality(q: typeof this.captures.quality, slot: Slot = "screen") {
+    await this.captures.applyQuality(q, slot);
     await this.peers.update("screen");
     this.bump();
   }
@@ -1348,6 +1528,7 @@ export class Controller {
       watching: [],
       error: "",
       notice: "",
+      knocks: [],
     };
     if (this.persist) history.replaceState(null, "", location.pathname);
     this.bump();

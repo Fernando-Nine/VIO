@@ -4,9 +4,10 @@ import type {
   Subscription,
   VideoDemand,
 } from "../../shared/protocol";
-import type { Captures } from "./capture";
+import type { Captures, Slot } from "./capture";
 import { mediaDeadline } from "./deadline";
 import { videoEncoding } from "./video-quality";
+import { preferVideoCodecs } from "./codecs";
 import { addRemoteTrack, removeRemoteTrack } from "./remote-stream";
 export interface PeerInfo {
   id: string;
@@ -53,6 +54,8 @@ interface Peer {
   info: PeerInfo;
   events: AbortController;
 }
+/** Kinds whose sender follows each viewer's video demand. */
+const hasDemand = (kind: string) => kind === "screen" || kind === "camera";
 export class Peers {
   entries = new Map<string, Peer>();
   ice: IceConfig = { iceServers: [], expiresAt: 0, turn: false };
@@ -111,12 +114,12 @@ export class Peers {
       return;
     }
     const outgoing = sub.publication.owner === this.me();
-    if (outgoing && !this.captures.sources.has(sub.publication.kind)) return;
+    if (outgoing && !this.captures.sourceFor(sub.publication)) return;
     const pendingDemand = this.pendingVideoDemand.get(sub.id);
     if (
       outgoing &&
       sub.tier === "main" &&
-      sub.publication.kind === "screen" &&
+      hasDemand(sub.publication.kind) &&
       pendingDemand
     )
       sub = { ...sub, demand: pendingDemand };
@@ -196,23 +199,23 @@ export class Peers {
     };
     if (outgoing)
       await this.serial(peer, async () => {
+        const source = this.captures.sourceFor(sub.publication);
+        const slot = source && this.captures.slotOf(source);
         const stream =
           sub.tier === "preview"
-            ? await this.captures.previewStream()
-            : this.captures.sources.get(sub.publication.kind)?.stream;
+            ? slot && (await this.captures.previewStream(slot))
+            : source?.stream;
         if (this.entries.get(sub.id) !== peer) {
-          if (
-            ![...this.entries.values()].some(
-              (p) => p.outgoing && p.sub.tier === "preview",
-            )
-          )
-            this.captures.stopPreview();
+          this.releasePreviews();
           return;
         }
         if (!stream) throw new Error("A captura foi encerrada.");
         for (const track of stream.getTracks()) {
           const sender = pc.addTrack(track, stream);
-          if (track.kind === "video") peer.videoSender = sender;
+          if (track.kind === "video") {
+            peer.videoSender = sender;
+            await preferVideoCodecs(pc, sender);
+          }
         }
         peer.started = true;
         await this.offer(peer, false);
@@ -344,7 +347,7 @@ export class Peers {
     if (
       !peer.outgoing ||
       peer.sub.tier !== "main" ||
-      peer.sub.publication.kind !== "screen"
+      !hasDemand(peer.sub.publication.kind)
     )
       return;
     peer.sub.demand = { video: demand.video, height: demand.height };
@@ -353,15 +356,18 @@ export class Peers {
   async parameters(peer: Peer) {
     const sender = peer.videoSender;
     if (!sender) return;
-    const source = this.captures.sources
-      .get(peer.sub.publication.kind)
-      ?.stream.getVideoTracks()[0];
+    const local = this.captures.sourceFor(peer.sub.publication);
+    const source = local?.stream.getVideoTracks()[0];
     const demand = peer.sub.demand;
     const active = demand?.video !== "off";
     if (!sender.track && active && source) await sender.replaceTrack(source);
     const height = (sender.track || source)?.getSettings().height;
-    const quality = { ...this.captures.quality };
-    if (demand && peer.sub.tier === "main") {
+    const quality = { ...this.captures.qualityOf(local) };
+    if (
+      demand &&
+      peer.sub.tier === "main" &&
+      peer.sub.publication.kind === "screen"
+    ) {
       quality.resolution = Math.min(quality.resolution, demand.height);
       if (demand.video === "small") {
         quality.fps = Math.min(quality.fps, 12);
@@ -373,7 +379,8 @@ export class Peers {
             500,
             Math.round(
               quality.bitrate *
-                (quality.resolution / this.captures.quality.resolution),
+                (quality.resolution /
+                  this.captures.qualityOf(local).resolution),
             ),
           ),
         );
@@ -385,7 +392,13 @@ export class Peers {
     }
     Object.assign(
       p.encodings[0],
-      videoEncoding(quality, peer.sub.publication.kind, peer.sub.tier, height),
+      videoEncoding(
+        quality,
+        peer.sub.publication.kind,
+        peer.sub.tier,
+        height,
+        demand,
+      ),
       { active },
     );
     try {
@@ -411,13 +424,27 @@ export class Peers {
         peer.sub.tier !== "preview"
       ) {
         await this.serial(peer, async () => {
-          const source = this.captures.sources.get(peer.sub.publication.kind);
-          for (const sender of peer.pc.getSenders()) {
+          const source = this.captures.sourceFor(peer.sub.publication);
+          const senders = peer.pc.getSenders();
+          for (const sender of senders) {
             const track = source?.stream
               .getTracks()
               .find((t) => t.kind === sender.track?.kind);
             if (track && sender.track !== track)
               await sender.replaceTrack(track);
+            // The new source has no sound: send nothing instead of a stopped track.
+            else if (source && !track && sender.track?.kind === "audio")
+              await sender.replaceTrack(null);
+          }
+          const audio = source?.stream.getAudioTracks()[0];
+          // A publication has at most one video and one audio sender.
+          const audioSender = senders.find((s) => s !== peer.videoSender);
+          if (audio && audioSender && !audioSender.track)
+            await audioSender.replaceTrack(audio);
+          else if (audio && !audioSender && source) {
+            // A replaced source gained sound: one more m-line, renegotiated by us.
+            peer.pc.addTrack(audio, source.stream);
+            await this.offer(peer, false);
           }
           await this.parameters(peer);
         });
@@ -439,13 +466,19 @@ export class Peers {
       t.onunmute = null;
       t.stop();
     });
-    if (
-      ![...this.entries.values()].some(
-        (p) => p.outgoing && p.sub.tier === "preview",
-      )
-    )
-      this.captures.stopPreview();
+    this.releasePreviews();
     this.changed();
+  }
+  /** Each screen keeps its live thumbnail only while a preview peer sends it. */
+  private releasePreviews() {
+    const used = new Set<Slot>();
+    for (const p of this.entries.values())
+      if (p.outgoing && p.sub.tier === "preview") {
+        const source = this.captures.sourceFor(p.sub.publication);
+        const slot = source && this.captures.slotOf(source);
+        if (slot) used.add(slot);
+      }
+    this.captures.keepPreviews(used);
   }
   closePublication(id: string) {
     for (const peer of [...this.entries.values()])
@@ -463,8 +496,8 @@ export class Peers {
             peer.sub.publication.kind === "screen" &&
             peer.sub.tier === "main"
           ) {
-            const height = this.captures.sources
-              .get("screen")
+            const height = this.captures
+              .sourceFor(peer.sub.publication)
               ?.stream.getVideoTracks()[0]
               ?.getSettings().height;
             if (height !== peer.sourceHeight)

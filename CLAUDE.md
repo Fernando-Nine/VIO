@@ -17,14 +17,16 @@ O resto de `docs/` é referência técnica; `docs/arquivo/` é histórico e **n�
 
 ## Equipe
 
-| Área              | Papel                                                              | Handoff       |
-| ----------------- | ------------------------------------------------------------------ | ------------- |
-| Copiloto          | Chat central: decisões, prioridades, escopo, revisão e coordenação | `copiloto.md` |
-| Frontend/UX       | Interface, canvas, widgets, sons de interface, acessibilidade      | `frontend.md` |
-| Mídia             | WebRTC, captura, áudio, TURN, futuro app Windows/celular           | `midia.md`    |
-| Backend/Segurança | Servidor, protocolo, permissões, limites, revisão de segurança     | `backend.md`  |
-| QA/Release        | CI, testes, BrowserLab, versões, promoção para o VIO               | `qa.md`       |
-| Design/Produto    | Rascunhos visuais, landing, página de download, identidade         | `design.md`   |
+| Área              | Papel                                                              | Handoff         |
+| ----------------- | ------------------------------------------------------------------ | --------------- |
+| Copiloto          | Chat central: decisões, prioridades, escopo, revisão e coordenação | `copiloto.md`   |
+| Frontend/UX       | Interface, canvas, widgets, sons de interface, acessibilidade      | `frontend.md`   |
+| Mídia             | WebRTC, captura, áudio, TURN, futuro app Windows/celular           | `midia.md`      |
+| Backend/Segurança | Servidor, protocolo, permissões, limites, revisão de segurança     | `backend.md`    |
+| QA/Release        | CI, testes, BrowserLab, versões, promoção para o VIO               | `qa.md`         |
+| Design/Produto    | Rascunhos visuais, landing, página de download, identidade         | `design.md`     |
+| Jurídico          | LGPD, menores, direitos autorais, termos e política de privacidade | `juridico.md`   |
+| Roteirista        | Ideias novas e crítica de funções antigas; propõe, não implementa  | `roteirista.md` |
 
 Cada área trabalha dentro do seu escopo. Mudança que cruza áreas: registre na issue e
 avise o copiloto pelo handoff; não reescreva o território do outro em silêncio.
@@ -106,6 +108,10 @@ de `.claude/handoff/README.md`, faça commit e avise. O chat novo começa lendo
 - TypeScript estrito, sem `any` solto. Prettier formata. Ícones `lucide-react`.
 - Fontes: Bricolage Grotesque (interface) e IBM Plex Mono (código da sala, ping, números).
 - Erro visível ao usuário: `Fault` com `code` e mensagem em português, nunca stack trace.
+- Movimento: **o ponto da marca conduz as transições** (entrar na sala, trocar de página, abrir
+  widget, mudar o conjunto da tela), sempre levando de um lugar a outro e presente na tela. Só
+  `transform`/`opacity`, encaixe perfeito, e `prefers-reduced-motion` + Acessibilidade reduzem a
+  só esmaecimento. Animação nova: use as skills de movimento (`emil-design-eng`, `impeccable`).
 - Interface enxuta: sem texto que explique o óbvio, sem aviso repetido, sem botão morto.
   Prefira edição direta, hover e menu de botão direito a painéis de ajustes.
 

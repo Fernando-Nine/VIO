@@ -1,41 +1,66 @@
 # design — handoff
 
-Atualizado: 2026-10-26
+Atualizado: 2026-10-29 (leva 5 fechada)
 
 ## Agora
 
-Leva 3 entregue para escolha (#146–#150), aguardando o aval do usuário.
-Canvas leva 3: https://claude.ai/artifact/3yJ4umERzwmY3vtWfxt8hJ (seções `#cabecalho`,
-`#combinados`, `#camera`, `#ajustes`, `#telas`). Resumo comentado em cada issue.
-Leva 2: https://claude.ai/artifact/819UwyvwKn6c5WCU1X5Hv8 · leva 1:
-https://claude.ai/artifact/3M2c9eiZF8Pp26bjBhMjAZ. Specs em `docs/design/`.
+**Leva 5 fechada** (29 out). Canvas **VIO · Leva 5** https://claude.ai/artifact/6wwRHH5cSppNTGfAm4rKtZ,
+linha "Escolhidas" no topo. Escolhas: landing A (`landing.md`, #258; celular sem o vazio no fim),
+início B (`inicio.md`, #259; Criar e Entrar abrem no lugar), #242 A (`sala-trancada.md`, #260),
+transição A como padrão do VIO (`transicoes.md`, #261; ponto medido no layout real, encaixe
+perfeito; Reduzir movimento em Acessibilidade). Sala A escolhida, mas o detalhe da sala fica
+para uma leva futura: **não começar** sem pedido.
+
+**#227 marca/brandbook/design system** publicada, aguardando escolha por comentário:
+canvas **VIO · Marca** https://claude.ai/artifact/CQ7zbg9248JmEqZFeHAAoo (logo A/B/C, paleta A/B,
+tipografia, voz, uso, tokens, componentes) e Figma https://www.figma.com/design/CoylihBjLm50Z2ySHEw3Dp
+(variáveis de cor A e B, medidas, estilos de texto VIO/\*, logos, Botão e Selo). Recomendado: logo A +
+paleta A. Plano Figma starter: 1 modo por coleção, por isso A e B são coleções separadas.
+Após o aval: spec `docs/design/marca.md` + issue `frontend` para unificar tokens
+(`styles.css` × `room.css` divergem; ~40 cores soltas; 14 raios).
+
+Leva 4 fechada em parte (27 out). Canvas **VIO · Leva 4** https://claude.ai/artifact/7ERZLFRtHn6xXE6mXcoPUf,
+com a linha "Escolhidas" no topo.
+
+- #197 fechada na leva 5 (acima).
 
 ## Feito recentemente
 
-- Leva 3, um só sistema visual tirado da sala rc.13 (cabeçalho 38 px, raio 10):
-  - #146 cabeçalho: A dois botões (rec.), B × que pergunta, C só − e fechar no menu;
-    Desfazer 8 s (rec.) ou confirmar; botão "Escondidos" para reabrir.
-  - #147 Pessoas A/B/C, Minha transmissão A/B (+ vazio), tempo da sala no cabeçalho do
-    site, tempo da tela 1 (na tela, rec.) ou 2 (no site); tabela de migração dos antigos.
-  - #148 Câmeras A grade (rec.), B uma pessoa, C destaque; nota para Mídia.
-  - #149 mapa do menu + Voz (lista A) e Notificações (lista B); fone no rodapé.
-  - #150 balões e sino; adicionar widget A/B/C; layout A/B + celular; volume A/B.
-- Volume: trilho com marca em 100% e trecho amplificado dourado (sugestão).
-- Prévia do Render inacessível pela rede do contêiner: olhar a sala com build local
-  (`npm run dev` + Playwright).
+- Leva 4: #191 A (app com suporte) + B (navegador), `compartilhar.md`. #195 A + D + E
+  (borda com Shift, sem atalho novo), `grade-foco.md`, #221. #196 B + aba Comunidade,
+  `adicionar-widget.md` reescrita, #222. #195 e #196 fechadas.
+
+- Skill `vio-design-delivery` (formato da leva 3 + edição das levas 1/2) e
+  `docs/design/ideias-futuras.md` (categorias futuras de Ajustes, divergências com o plano da #168).
+- Escolhas do usuário (27 out) viraram specs e issues `frontend`:
+  - Cabeçalho − / × + Desfazer + "N não exibidos" — `cabecalho-widget.md`, #158 (+backend).
+  - Widget Pessoas C, volume sempre à vista, menu só no botão direito — `widget-pessoas.md`, #159.
+  - Minha transmissão A + silenciar, trocar, seletor 1/2 — `minha-transmissao.md`, #160 (+midia).
+  - Tempo da sala no site, tempo da tela na tela — `tempos.md`, #161.
+  - Câmeras C + B (destaque, uma na Tira, fixar; sem amassar) — `cameras.md`, #162 (+midia).
+  - Ajustes em grupos com busca + Desativar áudio na doca — `ajustes.md` (reescrita), #163.
+  - Avisos B no topo com barra de tempo — `notificacoes.md`, #164.
+  - Adicionar widget A + B + C — `adicionar-widget.md`, #165.
+  - Layout A sem Foco único + celular — `layout.md`, #166.
+  - Volume: dourado, botão direito, vertical em tela cheia — `volume.md`, #167.
+  - Itens novos de Ajustes, para depois — #168.
+- `widgets-padrao.md` (nomes do menu) e `transmissoes.md` (etiqueta vira aviso no topo) ajustados.
+- Prévia do Render inacessível pela rede do contêiner: olhar a sala com build local.
 
 ## Decisões
 
-- Skills do projeto: `vio-design-system` e `vio-design-review` (`.claude/skills/`).
-- Destaque discreto `#A6A9FF`; animações ≤ 800 ms, desligadas em movimento reduzido.
+- "Silenciar para mim" (#107): qualquer pessoa silencia para si; "para todos" só o dono
+  (#122, implementado).
+
+- Skills do projeto: `vio-design-system`, `vio-design-review` e `vio-design-delivery`.
+- Destaque discreto `#A6A9FF`; volume acima de 100% em `#F2D36B`.
+- Animações ≤ 800 ms, desligadas em movimento reduzido.
 
 ## Pendente / bloqueios
 
-- Usuário: ícone do convidado em #146 (× ou −; recomendei −) e uma alternativa por peça.
-- Confirmar com o copiloto: "Silenciar para mim" (#107) e a leitura de A + C (#109).
+- Copiloto: milestone das issues #158–#168.
 
 ## Próximo passo
 
-Após o aval: specs em `docs/design/` (cabecalho, pessoas v2, transmissao, cameras,
-ajustes v2, notificacoes, adicionar-widget, layout, volume) + issues `frontend`; itens
-novos de Ajustes viram issues separadas.
+Esperar o conteúdo da landing (copiloto) e a forma de criar sala, para fechar a #197.
+Copiloto decide as divergências listadas em `ideias-futuras.md` (nome do grupo App, Atalhos).

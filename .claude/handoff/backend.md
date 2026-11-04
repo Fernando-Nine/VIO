@@ -1,14 +1,37 @@
 # Backend/Segurança — handoff
 
-Atualizado: 2026-10-25
+Atualizado: 2026-10-28 (#242)
 
 ## Agora
 
-#122 (PR #126): "Silenciar para todos" no servidor — aguardando CI → squash merge.
-Contrato comentado na #122 (Frontend: menus; Mídia: soltar o microfone ao ser bloqueado).
+Nada em andamento. #242 (servidor/protocolo) entregue na rc.16; interface fica com o Frontend.
 
 ## Feito recentemente
 
+- #242: `permissions.locked` (opcional: credenciais antigas seguem válidas; fora de
+  `defaultPermissions` para não virar switch). Trancada: entram membros atuais, `Room.known`
+  (quem já esteve, 500), `restoredAdmins`, credencial de criador e convite; o resto vai a
+  `Room.waiting` (`join` → Fault `WAITING` + evento `waiting {expiresAt}`). Comandos `admit
+  {id, allow}`, `invite-create {ttl: 1h|1d|7d}` → `{invite, expiresAt}`, `invite-revoke`.
+  Eventos: `waiting-list` (só criador/admins; `[]` para quem perde o cargo), `admission
+  {allowed, message?}` (aceito = refazer `join`). Convite `issueInvite/verifyInvite`
+  (prefixo `invite.`, `gen` da sala; revogadas só em memória). `sign/verifySigned` em
+  `security.ts` servem credencial e convite. Cliente: `view.waiting`, `view.knocks`,
+  `setLocked`, `admit`, `createInvite`, `revokeInvites`, `enter(nome, código, false,
+  convite)`, `invite(code, token)` em `endpoint.ts` (`?convite=`). Testes `room-lock*.test.ts`.
+
+- #226: credencial de cargo da sala (`issueRoomCredential`/`verifyRoomCredential` em
+  `security.ts`, HMAC com prefixo `room.`). Portadora, atrelada ao código (ids de sessão
+  mudam por aba/expiração). `rank` = quando o cargo foi dado; provisório assina 0.
+  `Room.creatorRank/provisional/fresh/restoredAdmins/lentFromAdmin`. Vence quem tem
+  `rank` maior, ou ≥ se o criador atual é provisório. Transferência e `leave` explícito
+  dão `rank` novo; tolerância vencida só empresta. Evento `room-credential` (null =
+  esquecer); `JoinResult.credential`. Cliente guarda em `localStorage`
+  `vio:room-credentials` (20 salas). Testes: `room-credential*.test.ts`.
+
+- #158: `widget-delete` guarda o widget 8 s (`RoomWidgets.closed`, `closedWidgetHold`);
+  `widget-updated.closed { by, byName, until }`; `widget-restore` só para quem fechou ou
+  pode fechar, respeitando limites.
 - #122: comando `moderate { participantId, voiceBlocked }` só do criador; encerra só a
   `voice`; `Participant.voiceBlocked`; `publish` de voz recusado com `VOICE_BLOCKED`;
   `transfer` limpa o bloqueio.
@@ -38,6 +61,9 @@ Contrato comentado na #122 (Frontend: menus; Mídia: soltar o microfone ao ser b
 
 ## Pendente / bloqueios
 
+- Frontend (#242): ler `?convite=` e passar ao `enter`; tela de espera (`view.waiting`),
+  aviso com Aceitar/Recusar (`view.knocks`), Trancar, Copiar convite e Revogar.
+
 - Frontend: interface dos switches da #71 e usar `canEditPublic(..., "guestControl")`
   nos controles de cronômetro, votação e tarefas.
 - 1 alta só em dev: `vite` 8.3.x → QA.
@@ -47,4 +73,5 @@ Contrato comentado na #122 (Frontend: menus; Mídia: soltar o microfone ao ser b
 
 ## Próximo passo
 
-Mesclar #73 com CI verde; depois revisar PRs do Frontend que usem as permissões.
+Widgets e avisos da sala ainda se perdem num reinício (fora da #226; só em memória).
+Revisar PRs do Frontend que usem as permissões.
